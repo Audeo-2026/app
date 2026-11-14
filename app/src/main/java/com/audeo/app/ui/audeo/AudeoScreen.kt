@@ -102,6 +102,8 @@ fun AudeoApp(vm: AudeoViewModel) {
                     CallBar(
                         name = call.peerName,
                         role = when {
+                            call.status == CallStatus.ACTIVE && s.callAudioState == "failed" -> "Audeo 통화 · 음성 연결 실패"
+                            call.status == CallStatus.ACTIVE && s.callAudioState != "connected" -> "Audeo 통화 · 음성 연결 중"
                             call.analysisOn -> "Audeo 통화 · 분석 동의함"
                             call.status == CallStatus.RINGING && !call.outgoing -> "Audeo 전화 수신"
                             call.status == CallStatus.RINGING && call.analysisRequested -> "Audeo 통화 · 동의 요청 중"
@@ -416,6 +418,7 @@ private fun DemoMenu(s: AudeoUiState, vm: AudeoViewModel, modifier: Modifier = M
                     DemoChip(mode, false, vm::toggleNight)
                     DemoChip("SDK 상태", false, vm::toggleStatus)
                     DemoChip("서버 다시 확인", false, vm::checkServer)
+                    DemoChip("받아쓰기 시험", false, vm::testTranscription)
                 }
                 Text(
                     serverLine(s.server),
@@ -423,7 +426,8 @@ private fun DemoMenu(s: AudeoUiState, vm: AudeoViewModel, modifier: Modifier = M
                     color = if (s.server.status == ServerStatus.OFFLINE) c.danger else c.inkMuted,
                 )
                 Text(
-                    "내비 ${if (s.navi.connected) "연결됨" else "연결 안 됨"} · 위치 ${s.location ?: "-"}",
+                    "내비 ${if (s.navi.connected) "연결됨" else "연결 안 됨"} · 위치 ${s.location ?: "-"}" +
+                        (s.callAudioState?.let { " · 통화 음성 $it" } ?: ""),
                     style = AudeoType.bodySm,
                     color = c.inkMuted,
                 )

@@ -1,5 +1,6 @@
 package com.audeo.app
 
+import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -15,21 +16,25 @@ class MainActivity : ComponentActivity() {
 
     private val vm: AudeoViewModel by viewModels()
 
-    private val locationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> vm.onLocationPermission(granted) }
+    private val permissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            vm.onLocationPermission(result[FUSED_LOCATION] ?: granted(FUSED_LOCATION))
+            if (result[Manifest.permission.RECORD_AUDIO] == false) vm.onMicDenied()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { AudeoApp(vm) }
 
-        // FusedLocation은 dangerous 권한이라 실행 중에 허락을 받습니다.
-        if (ContextCompat.checkSelfPermission(this, FUSED_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            vm.onLocationPermission(true)
-        } else if (savedInstanceState == null) {
-            locationPermission.launch(FUSED_LOCATION)
-        }
+        // 위치(FusedLocation)와 마이크(통화 음성)는 dangerous 권한이라 실행 중에 허락을 받습니다.
+        val missing = listOf(FUSED_LOCATION, Manifest.permission.RECORD_AUDIO).filterNot(::granted)
+        if (granted(FUSED_LOCATION)) vm.onLocationPermission(true)
+        if (missing.isNotEmpty() && savedInstanceState == null) permissions.launch(missing.toTypedArray())
     }
+
+    private fun granted(permission: String) =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     private companion object {
         const val FUSED_LOCATION = "pleos.car.permission.FUSED_LOCATION"

@@ -73,6 +73,14 @@ python3 tools/fake_passenger.py call 운전자  # 차량으로 전화 걸기(수
 python3 tools/fake_passenger.py late 10    # 진행 중 여정에 "10분 늦어"
 ```
 
+통화 음성(WebRTC)까지 시험하려면 탑승자 웹 페이지를 씁니다(탑승자 앱은 링크로 들어오는 웹 앱으로 만들 예정).
+
+```bash
+python3 tools/web_passenger/serve.py   # http://127.0.0.1:8787/?auto=1 (전화가 오면 동의하고 받고, 한국어 대사를 통화로 말해요)
+```
+
+에뮬레이터와 연결되려면 Chrome을 `--disable-features=WebRtcHideLocalIpsWithMdns`로 열어야 합니다(로컬 IP를 mDNS로 숨기면 에뮬레이터가 못 찾아요).
+
 차량 준비 제안과 도착 화면은 차가 픽업 지점에 가까워져야(남은 거리·시간) 서버가 보냅니다. 에뮬레이터 차는 움직이지 않으니, 확인하려면 같은 운전자의 다른 기기 토큰으로 가까운 상태를 한 번 보내 주세요.
 
 ## 코드 위치

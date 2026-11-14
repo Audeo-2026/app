@@ -5,6 +5,8 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.audeo.app.BuildConfig
+import com.audeo.app.call.CallAudio
+import com.audeo.app.call.CallTranscriber
 import com.audeo.app.pleos.LocationController
 import com.audeo.app.pleos.NaviController
 import com.audeo.app.pleos.NaviEvent
@@ -62,6 +64,8 @@ data class AudeoUiState(
     val call: CallInfo? = null,
     val callSeconds: Int = 0,
     val muted: Boolean = false,
+    /** WebRTC 연결 상태(new, connecting, connected, failed …). 통화 음성이 없으면 null. */
+    val callAudioState: String? = null,
     val journey: Journey? = null,
     /** 지금 운전자에게 보여 줄 제안(질문 > 변경 > 차량 > 계획 순). */
     val proposal: Proposal? = null,
@@ -146,13 +150,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     /** TTS가 끝나면 운전자의 답을 한 번 듣습니다. */
     private var expectAnswer = false
 
-    init {
-        navi.connect { event -> viewModelScope.launch(Dispatchers.Main) { onNaviEvent(event) } }
-        val vehicleError = vehicle.start()
-        log(if (vehicleError == null) "Vehicle 준비됨" else "Vehicle 초기화 실패: $vehicleError")
-        voice.start(this)
-        connectServer()
-    }
 
     // ---------- 서버 연결 ----------
 
@@ -282,20 +279,36 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             var failures = 0
             while (isActive) {
                 try {
-                    val batch = server.events(after, LONG_POLL_SECONDS)
-                    if (failures > 0 || live.value.server.status != ServerStatus.ONLINE) {
-                        setServer(ServerStatus.ONLINE)
+                    // WebSocket: 이벤트와 통화 신호(rtc.signal)를 함께 받습니다. 끊기면 아래로 내려와 다시 붙어요.
+                    server.streamEvents(
+                        afterSeq = after,
+                        onOpen = {
+                            if (failures > 0 || live.value.server.status != ServerStatus.ONLINE) setServer(ServerStatus.ONLINE)
+                            if (failures > 0) log("실시간 연결 다시 붙음")
+                            failures = 0
+                        },
+                    ) { e ->
+                        // 접속하면 서버가 지난 이벤트를 다시 보내기도 해서, 이미 처리한 번호는 건너뜁니다(통화 신호는 번호가 없어요).
+                        if (e.seq in 1..after) return@streamEvents
+                        handle(e)
+                        if (e.seq > after) {
+                            after = e.seq
+                            store.lastSeq = after
+                        }
                     }
-                    failures = 0
-                    batch.events.forEach(::handle)
-                    after = maxOf(after, batch.lastSeq)
-                    store.lastSeq = after
+                    delay(1_000)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     failures++
                     setServer(ServerStatus.OFFLINE, message = e.message)
                     if (failures == 1) log("실시간 연결 끊김: ${e.message}")
+                    // WebSocket이 안 되면 long-poll로 놓친 이벤트를 따라잡습니다(통화 신호는 WebSocket으로만 와요).
+                    runCatching { server.events(after, 0) }.onSuccess { batch ->
+                        batch.events.forEach(::handle)
+                        after = maxOf(after, batch.lastSeq)
+                        store.lastSeq = after
+                    }
                     delay(minOf(30_000L, 2_000L * failures))
                 }
             }
@@ -322,6 +335,12 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
                 }
             }
             is ServerEvent.Say -> if (fresh(e, 30)) say(e.text, question = e.priority == "question" && e.proposalId != null)
+            is ServerEvent.RtcSignal -> when {
+                e.callId != live.value.call?.id -> log("다른 통화의 신호: ${e.kind}")
+                callAudio.active -> callAudio.onRemoteSignal(e.kind, e.payload)
+                // 통화 음성을 준비하는 중(ICE 설정을 받는 중)에 온 신호는 모아 뒀다가 준비되면 넣습니다.
+                else -> earlySignals.add(e.kind to e.payload)
+            }
             is ServerEvent.Other -> log("이벤트: ${e.type}")
         }
     }
@@ -348,12 +367,16 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             }
             CallStatus.ACTIVE -> {
                 live.update { it.copy(call = call, voice = if (prev?.status != CallStatus.ACTIVE) null else it.voice) }
-                if (prev?.id != call.id || prev.status != CallStatus.ACTIVE) startCallTimer()
-                if (call.analysisOn) startScript(call) else stopScript()
+                if (prev?.id != call.id || prev.status != CallStatus.ACTIVE) {
+                    startCallTimer()
+                    startCallAudio(call)
+                }
+                updateTranscription(call)
             }
             CallStatus.ENDED -> {
                 stopCallTimer()
                 stopScript()
+                stopCallAudio()
                 val missed = prev?.status == CallStatus.RINGING
                 live.update {
                     it.copy(
@@ -490,7 +513,10 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     fun endCall() = callAction("통화를 끝내지 못했어요") { server.endCall(it.id) }
 
-    fun toggleMute() = live.update { it.copy(muted = !it.muted) }
+    fun toggleMute() {
+        live.update { it.copy(muted = !it.muted) }
+        callAudio.setMuted(live.value.muted)
+    }
 
     private fun callAction(failure: String, block: suspend (CallInfo) -> CallInfo) {
         if (previewOnly()) return
@@ -793,6 +819,92 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
+    // ---------- 통화 음성(WebRTC)·받아쓰기 ----------
+
+    private val callAudio = CallAudio(app, object : CallAudio.Listener {
+        override fun onLocalSignal(kind: String, payload: JSONObject) {
+            val id = live.value.call?.id ?: return
+            viewModelScope.launch {
+                runCatching { server.signal(id, kind, payload) }.onFailure { log("통화 신호 전송 실패($kind): ${it.message}") }
+            }
+        }
+
+        override fun onConnectionState(state: String) {
+            viewModelScope.launch(Dispatchers.Main) {
+                log("통화 음성 연결: $state")
+                live.update { it.copy(callAudioState = state) }
+            }
+        }
+
+        override fun onLocalAudio(pcm: ByteArray, sampleRate: Int, channels: Int) = transcriber.feed("tx", pcm, sampleRate, channels)
+        override fun onRemoteAudio(pcm: ByteArray, sampleRate: Int, channels: Int) = transcriber.feed("rx", pcm, sampleRate, channels)
+        override fun onLog(message: String) {
+            viewModelScope.launch(Dispatchers.Main) { log(message) }
+        }
+    })
+
+    private val transcriber = CallTranscriber(
+        voice,
+        onText = { channel, text -> viewModelScope.launch(Dispatchers.Main) { onTranscribed(channel, text) } },
+        onLog = { m -> viewModelScope.launch(Dispatchers.Main) { log(m) } },
+    )
+    private var transcriberError: String? = null
+    private var utteranceSeq = 0L
+    private var iceServers: List<com.audeo.app.server.IceServerInfo>? = null
+    private val earlySignals = ArrayList<Pair<String, JSONObject>>()
+
+    /** 통화가 연결되면 음성을 잇습니다. 건 쪽이 offer를 보냅니다. */
+    private fun startCallAudio(call: CallInfo) {
+        if (call.id == "preview") return
+        utteranceSeq = 0
+        viewModelScope.launch {
+            val ice = iceServers ?: runCatching { server.rtcConfig() }.getOrElse {
+                log("ICE 설정을 못 받아 기본 STUN을 써요: ${it.message}")
+                listOf(com.audeo.app.server.IceServerInfo(listOf("stun:stun.l.google.com:19302"), null, null))
+            }.also { iceServers = it }
+            if (live.value.call?.id != call.id) return@launch
+            callAudio.start(ice, caller = call.outgoing)
+            callAudio.setMuted(live.value.muted)
+            earlySignals.forEach { (kind, payload) -> callAudio.onRemoteSignal(kind, payload) }
+            earlySignals.clear()
+        }
+    }
+
+    private fun stopCallAudio() {
+        earlySignals.clear()
+        callAudio.close()
+        transcriber.stop()
+        live.update { it.copy(callAudioState = null) }
+    }
+
+    /** 두 사람 모두 AI 분석에 동의했을 때만 받아씁니다. 받아쓰기를 못 쓰면 테스트 대본으로 대신해요. */
+    private fun updateTranscription(call: CallInfo) {
+        when {
+            !call.analysisOn -> {
+                transcriber.stop()
+                stopScript()
+            }
+            transcriber.ready -> transcriber.start()
+            else -> {
+                log("받아쓰기 엔진이 없어 테스트 대본으로 대신해요 (${transcriberError ?: "준비 중"})")
+                startScript(call)
+            }
+        }
+    }
+
+    private fun onTranscribed(channel: String, text: String) {
+        val call = live.value.call ?: return
+        if (!call.analysisOn) return
+        val who = if (channel == "rx") "${call.peerCallName}이 말하는 중" else "내가 말하는 중"
+        live.update { it.copy(voice = VoiceUi(VoiceMode.LISTENING, who = who, caption = "“$text”")) }
+        log("받아씀($channel): $text")
+        val seq = ++utteranceSeq
+        viewModelScope.launch {
+            runCatching { server.utterances(call.id, listOf(Utterance(seq, channel, text))) }
+                .onFailure { log("받아쓰기 전송 실패: ${it.message}") }
+        }
+    }
+
     // ---------- 통화(테스트 대본) ----------
 
     /** 통화 음성이 붙기 전까지, 대본을 3초 간격으로 받아쓰기 결과처럼 서버에 보냅니다. */
@@ -867,7 +979,23 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     fun toggleStatus() = live.update { it.copy(showStatus = !it.showStatus) }
 
-    // ---------- 위치 ----------
+    // ---------- 위치·마이크 ----------
+
+    fun onMicDenied() = log("마이크 권한 없음: 통화 음성을 보낼 수 없어요")
+
+    /** 데모 메뉴의 '받아쓰기 시험': debug 빌드에 넣은 한국어 음성(16kHz PCM)을 Pleos STT 온디바이스로 받아써 봅니다. */
+    fun testTranscription() {
+        val pcm = runCatching { getApplication<Application>().assets.open("stt_selftest.pcm").use { it.readBytes() } }.getOrNull()
+            ?: return log("시험 음성이 없어요(debug 빌드에만 있어요)")
+        if (!transcriber.ready) return log("받아쓰기 엔진이 준비되지 않았어요: ${transcriberError ?: "준비 중"}")
+        log("받아쓰기 시험 중… (${pcm.size / 32}ms)")
+        viewModelScope.launch(Dispatchers.IO) {
+            val started = System.currentTimeMillis()
+            val text = transcriber.recognizeBlocking(pcm)
+            val ms = System.currentTimeMillis() - started
+            launch(Dispatchers.Main) { log(if (text != null) "받아쓰기 시험 결과(${ms}ms): $text" else "받아쓰기 시험: 결과 없음") }
+        }
+    }
 
     fun onLocationPermission(granted: Boolean) {
         if (!granted) {
@@ -939,7 +1067,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             delay(3_000L + text.length * 180L)
             if (live.value.voice == v) live.update { it.copy(voice = null) }
         }
-        if (question) speakThenListen(text) else {
+        if (question && live.value.call?.status != CallStatus.ACTIVE) speakThenListen(text) else {
             expectAnswer = false
             voice.speak(text)
         }
@@ -1029,7 +1157,18 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         live.update { it.copy(log = (listOf(line) + it.log).take(30)) }
     }
 
+    // 초기화는 맨 끝에 둡니다. 위의 프로퍼티(통화 음성, 받아쓰기 등)가 모두 만들어진 뒤에 실행돼야 해요.
+    init {
+        navi.connect { event -> viewModelScope.launch(Dispatchers.Main) { onNaviEvent(event) } }
+        val vehicleError = vehicle.start()
+        log(if (vehicleError == null) "Vehicle 준비됨" else "Vehicle 초기화 실패: $vehicleError")
+        voice.start(this)
+        connectServer()
+    }
+
     override fun onCleared() {
+        callAudio.release()
+        transcriber.stop()
         connectJob?.cancel()
         eventJob?.cancel()
         statusJob?.cancel()
