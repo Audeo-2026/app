@@ -37,6 +37,9 @@ sealed interface ServerEvent {
 
     /** Audeo가 운전자에게 말할 문장. priority: question이면 말한 뒤 답을 듣습니다. */
     data class Say(override val seq: Long, override val at: Instant?, val text: String, val priority: String?, val proposalId: String?) : ServerEvent
+
+    /** 상대 기기가 보낸 WebRTC 신호(offer, answer, ice, hangup). WebSocket으로만 오고 seq가 없습니다. */
+    data class RtcSignal(override val seq: Long, override val at: Instant?, val callId: String, val kind: String, val payload: JSONObject, val from: String?) : ServerEvent
     data class Other(override val seq: Long, override val at: Instant?, val type: String) : ServerEvent
 }
 
@@ -235,6 +238,9 @@ object Protocol {
                 "execution.requested" -> ServerEvent.ExecutionRequested(seq, at, execution(d))
                 "execution.result" -> ServerEvent.ExecutionReported(seq, at, execution(d))
                 "coordination.updated" -> ServerEvent.CoordinationUpdated(seq, at, o.str("journey_id"), coordination(d))
+                "rtc.signal" -> ServerEvent.RtcSignal(
+                    seq, at, d.str("call_id").orEmpty(), d.str("kind").orEmpty(), d.optJSONObject("payload") ?: JSONObject(), d.str("from"),
+                )
                 "agent.say" -> if (d.str("role") == null || d.str("role") == "driver") {
                     ServerEvent.Say(seq, at, d.str("text").orEmpty(), d.str("priority"), d.str("proposal_id"))
                 } else {

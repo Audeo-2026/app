@@ -1,11 +1,14 @@
 package com.audeo.app.pleos
 
 import ai.pleos.playground.stt.SpeechToText
+import ai.pleos.playground.stt.constant.Mode
 import ai.pleos.playground.stt.listener.ResultListener
 import ai.pleos.playground.tts.TextToSpeech
 import ai.pleos.playground.tts.listener.EventListener
 import android.content.Context
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import ai.pleos.playground.stt.constant.ErrorType as SttError
 import ai.pleos.playground.stt.listener.OnInitializeListener as SttInit
 import ai.pleos.playground.tts.constant.ErrorType as TtsError
@@ -13,7 +16,8 @@ import ai.pleos.playground.tts.listener.OnInitializeListener as TtsInit
 
 /**
  * 차 안 음성: Pleos TTS로 짧게 말하고, Pleos STT로 운전자의 짧은 답("그렇게 해 줘", "3번 출구", "차 탔어")을 듣습니다.
- * 통화 음성 받아쓰기는 Audeo 서버가 맡으므로 여기서는 하지 않습니다.
+ * 통화 받아쓰기도 같은 STT를 씁니다([recognizePcm]). 한 앱 안에서 STT 인스턴스를 둘 만들면 결과가 한쪽으로만 와서,
+ * 하나를 온디바이스 모드로 만들어 마이크 듣기와 PCM 받아쓰기(sendAudio, 온디바이스 전용)에 함께 씁니다.
  */
 class VoiceController(context: Context) {
 
@@ -27,12 +31,17 @@ class VoiceController(context: Context) {
 
     private val app = context.applicationContext
     private val tts = TextToSpeech(app)
-    private val stt = SpeechToText(app)
+    private val stt = SpeechToText(app, Mode.ON_DEVICE)
     private var callbacks: Callbacks? = null
 
     @Volatile private var ttsReady = false
     @Volatile private var sttReady = false
     @Volatile private var listening = false
+
+    /** PCM 받아쓰기를 기다리는 중이면 결과를 여기로 보냅니다(마이크 답으로 처리하지 않음). */
+    @Volatile private var pcmWaiter: ((String?) -> Unit)? = null
+
+    val sttAvailable: Boolean get() = sttReady
 
     fun start(callbacks: Callbacks) {
         this.callbacks = callbacks
@@ -87,6 +96,28 @@ class VoiceController(context: Context) {
             .onFailure { callbacks?.onLog("STT 요청 실패: ${it.message}") }
     }
 
+    /**
+     * 16kHz·16비트·모노 PCM 한 덩어리를 받아씁니다. 결과가 올 때까지 막으니 작업 스레드에서 부르세요.
+     * 마이크로 듣는 중이면 먼저 멈춥니다.
+     */
+    fun recognizePcm(pcm: ByteArray, timeoutSeconds: Long = 10): String? = synchronized(this) {
+        if (!sttReady) return null
+        if (listening) runCatching { stt.stop() }.also { listening = false }
+        val latch = CountDownLatch(1)
+        var result: String? = null
+        pcmWaiter = { text ->
+            result = text
+            latch.countDown()
+        }
+        val sent = runCatching {
+            stt.sendAudio(pcm)
+            stt.completeAudioSend()
+        }.onFailure { callbacks?.onLog("받아쓰기 전송 실패: ${it.message}") }.isSuccess
+        if (sent && !latch.await(timeoutSeconds, TimeUnit.SECONDS)) callbacks?.onLog("받아쓰기 결과가 오지 않았어요 (${pcm.size / 32}ms)")
+        pcmWaiter = null
+        result?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
     fun stopListening() {
         if (!listening) return
         runCatching { stt.stop() }
@@ -128,6 +159,10 @@ class VoiceController(context: Context) {
 
     private val sttEvents = object : ResultListener {
         override fun onUpdated(stt: String, completed: Boolean) {
+            pcmWaiter?.let { waiter ->
+                if (completed) waiter(stt)
+                return
+            }
             if (completed) {
                 listening = false
                 callbacks?.onListening(false)
@@ -147,6 +182,11 @@ class VoiceController(context: Context) {
         }
 
         override fun onError(errorType: SttError) {
+            pcmWaiter?.let { waiter ->
+                callbacks?.onLog("받아쓰기 오류: $errorType")
+                waiter(null)
+                return
+            }
             listening = false
             callbacks?.onListening(false)
             callbacks?.onLog("STT 오류: $errorType")

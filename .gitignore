@@ -18,3 +18,6 @@ build/
 
 # 테스트 도구가 저장하는 토큰
 tools/.fake_passenger.json
+
+# 테스트 탑승자 페이지가 만드는 음성 파일
+tools/web_passenger/audio/

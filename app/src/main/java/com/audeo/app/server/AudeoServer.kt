@@ -7,6 +7,14 @@ import com.audeo.app.audeo.Coordination
 import com.audeo.app.audeo.Journey
 import com.audeo.app.audeo.Proposal
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -34,6 +42,9 @@ val Throwable.isUnauthorized: Boolean get() = this is ServerError.Api && status 
 data class Utterance(val clientSeq: Long, val channel: String, val text: String)
 
 data class EventBatch(val events: List<ServerEvent>, val lastSeq: Long)
+
+/** WebRTC ICE 서버(GET /rtc/config). */
+data class IceServerInfo(val urls: List<String>, val username: String?, val credential: String?)
 
 /**
  * Audeo 서버 v1 클라이언트(통화·받아쓰기·AI 판단·조율).
@@ -164,7 +175,96 @@ class AudeoServer(
         authed("POST", "executions/$executionId/result", body)
     }
 
+    /** WebRTC 신호를 상대 기기에 보냅니다. kind: offer, answer, ice, hangup. 상대는 WebSocket의 rtc.signal로 받아요. */
+    suspend fun signal(callId: String, kind: String, payload: JSONObject) {
+        authed("POST", "calls/$callId/signal", JSONObject().put("kind", kind).put("payload", payload))
+    }
+
+    suspend fun rtcConfig(): List<IceServerInfo> =
+        authed("GET", "rtc/config").optJSONArray("ice_servers").objects().map { o ->
+            val urls = when (val u = o.opt("urls")) {
+                is JSONArray -> (0 until u.length()).map { u.optString(it) }
+                is String -> listOf(u)
+                else -> emptyList()
+            }
+            IceServerInfo(urls, o.str("username"), o.str("credential"))
+        }
+
     // ---------- 실시간 이벤트 ----------
+
+    /**
+     * WebSocket(/ws)으로 이벤트를 받습니다. 연결이 끊기면 돌아옵니다(정상 종료는 null, 실패는 예외).
+     * 이벤트는 이 함수를 부른 코루틴에서 [onEvent]로 넘겨요. WebRTC 신호(rtc.signal)는 WebSocket으로만 옵니다.
+     */
+    suspend fun streamEvents(afterSeq: Long, onOpen: () -> Unit, onEvent: (ServerEvent) -> Unit) {
+        val token = ensureRegistered().token
+        val wsUrl = base.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://") + "/ws?token=$token&after_seq=$afterSeq"
+        val inbox = Channel<Any>(Channel.UNLIMITED)
+        val socket = wsClient.newWebSocket(
+            Request.Builder().url(wsUrl).header("User-Agent", USER_AGENT).build(),
+            object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    inbox.trySend(OPEN)
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    inbox.trySend(text)
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    inbox.trySend(if (code == 4401 || code == 1008) ServerError.Api(401, "ws_closed", "WebSocket 인증 거절($code)") else CLOSED)
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    val code = response?.code
+                    inbox.trySend(
+                        when {
+                            code == 401 || code == 403 -> ServerError.Api(code, "ws_rejected", "WebSocket 연결이 거절됐어요($code)")
+                            t is IOException -> ServerError.Network(t)
+                            else -> ServerError.BadResponse(t.message ?: t.javaClass.simpleName)
+                        },
+                    )
+                }
+            },
+        )
+        val myUserId = store.identity()?.userId
+        try {
+            for (item in inbox) {
+                when (item) {
+                    OPEN -> onOpen()
+                    CLOSED -> return
+                    is ServerError -> throw item
+                    is String -> {
+                        val o = try {
+                            JSONObject(item)
+                        } catch (e: JSONException) {
+                            continue
+                        }
+                        when (o.str("type")) {
+                            "pong" -> Unit
+                            "error" -> throw ServerError.BadResponse("WebSocket: ${o.optJSONObject("data")?.str("message")}")
+                            else -> onEvent(Protocol.event(o, myUserId))
+                        }
+                    }
+                }
+            }
+        } finally {
+            socket.cancel()
+        }
+    }
+
+    /** WebSocket 연결을 살려 두는 ping. 서버가 pong으로 답해요. */
+    private val wsClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(CONNECT_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
+            .build()
+    }
 
     /** [afterSeq] 이후 이벤트. 없으면 서버가 [waitSeconds]초까지 기다렸다가 돌려줍니다. */
     suspend fun events(afterSeq: Long, waitSeconds: Int): EventBatch {
@@ -271,6 +371,8 @@ class AudeoServer(
         const val CONNECT_TIMEOUT_MS = 5_000
         const val READ_TIMEOUT_MS = 15_000
         const val USER_AGENT = "Audeo-Car/${BuildConfig.VERSION_NAME}"
+        val OPEN = Any()
+        val CLOSED = Any()
     }
 }
 
