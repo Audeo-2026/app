@@ -33,11 +33,14 @@ FusedLocation SDK가 `android.hardware.type.automotive`를 필수 기능으로 �
 
 휴대폰이 함께 연결돼 있으면 `ANDROID_SERIAL=emulator-5554 ./gradlew installDebug`처럼 에뮬레이터를 지정하세요.
 
-첫 화면은 Audeo 차량 화면입니다(지도 위 다이얼로그 하나). 오른쪽 아래 `데모` 메뉴에서
+첫 화면은 Audeo 차량 화면입니다. 앱 영역을 지도로 채우고, 아래에는 AI 비서 캐릭터 '오디'가 말하는 시트를 둡니다.
 
-- `실제 화면` / 장면 이름: 서버 상태로 그린 실제 화면과, 테스트 데이터로 그린 장면 미리보기를 오갑니다. 미리보기에서는 버튼을 눌러도 실행하지 않습니다.
-- `SDK 상태`: 각 Pleos SDK가 연결할 차량 서비스가 설치돼 있는지, 버전이 최소 요구 버전 이상인지 보여 줍니다.
-- `서버 다시 확인`: Audeo 서버 연결을 다시 확인합니다.
+- 오디(`ui/audeo/Mascot.kt`): 그림 파일 없이 코드로 그린 캐릭터. 말할 때 입이 움직이고, 들을 때 안테나에서 물결이 퍼지고, 생각할 때 눈웃음을 지어요.
+- 비서 시트(`ui/audeo/Sheet.kt`): 왼쪽은 오디의 말(말풍선)과 근거·내용, 오른쪽은 고를 수 있는 길을 의사결정 트리처럼 펼치고 고르면 어떻게 되는지 함께 적어요.
+- 통화 카드(`ui/audeo/CallPanel.kt`): 보이스톡처럼 어두운 카드에 참가자 얼굴을 나란히 두고, 말하는 사람에게 초록 고리가 생겨요. 참가자는 몇 명이든 그릴 수 있지만 서버 통화는 아직 1:1입니다.
+- 지도(`ui/audeo/LiveMap.kt`): 무료 스택. [MapLibre](https://maplibre.org) 지도 엔진 + [OpenFreeMap](https://openfreemap.org) 타일(키·요금 없음, 한국어 이름 표시) + [OSRM](https://project-osrm.org) 공개 경로 서버. 실제 길안내는 차의 내비(NaviHelper)가 합니다. 에뮬레이터 차 위치는 `adb emu geo fix <경도> <위도>`로 옮겨요.
+
+개발 도구(낮/밤, SDK 상태, 서버 다시 확인, 받아쓰기 시험)는 화면 오른쪽 위 모서리를 길게 누르면 열려요.
 
 ## Audeo 서버 연결
 
@@ -60,7 +63,9 @@ audeo.vehicle.plate=00가0000
 4. 운전자가 고른 답은 `POST /proposals/{id}/decision`으로 보냅니다. 서버가 실행을 요청하면(`execution.requested`) 그때 NaviHelper·Vehicle SDK를 부르고, SDK 콜백으로 확인된 것만 `succeeded`로 보고합니다. 응답이 없으면 `unknown`입니다.
 5. 여정이 진행 중이면 15초마다 위치와 내비 남은 시간·거리를 보고합니다(`POST /journeys/{id}/status`).
 
-통화 음성(WebRTC)은 아직 붙이지 않았습니다. 통화가 연결되면 `TestData.callTranscript` 대본을 받아쓰기 결과처럼 서버에 보내서(`POST /calls/{id}/utterances`) 실제 AI 분석을 돌립니다.
+통화 음성은 WebRTC로 탑승자와 직접 잇고, 두 사람이 동의하면 차에서 Pleos STT로 받아써서 서버에 보냅니다(`POST /calls/{id}/utterances`).
+
+제안마다 결정할 사람은 서버가 `approver`로 정합니다. 운전자 몫(`driver`)이면 차 화면에 선택지가 뜨고, 탑승자 몫(`passenger`)이면 차에는 "○○님이 고르고 있어요"만 보이고 탑승자 페이지에 선택지가 뜹니다. 지금 서버는 만날 곳이 바뀌는 변경도 `driver`로 보내서, 탑승자 쪽으로 넘기려면 서버에서 `approver`를 바꿔야 합니다.
 
 ### 테스트 탑승자
 
@@ -91,7 +96,7 @@ python3 tools/web_passenger/serve.py   # http://127.0.0.1:8787/?auto=1 (전화�
 - `app/src/main/java/com/audeo/app/audeo/AudeoViewModel.kt`: 화면 흐름. 서버 이벤트로 장면을 정하고, 실행 요청을 SDK로 처리합니다.
 - `app/src/main/java/com/audeo/app/server/`: Audeo 서버 클라이언트(`AudeoServer`), 응답 해석(`Protocol`), 기기 토큰 저장(`DeviceStore`)
 - `app/src/main/java/com/audeo/app/pleos/*Controller.kt`: 내비·공조/시트·TTS/STT·위치 SDK 연동
-- `app/src/main/java/com/audeo/app/ui/audeo/`: 디자인 시스템 컴포넌트와 화면(다이얼로그, 지도, 통화 바)
+- `app/src/main/java/com/audeo/app/ui/audeo/`: 디자인 시스템 컴포넌트와 화면(비서 시트, 오디, 통화 카드, 지도)
 - `app/src/main/java/com/audeo/app/pleos/PleosServices.kt`: SDK와 서비스 버전 확인
 - `app/src/main/java/com/audeo/app/pleos/VehicleProbe.kt`: Vehicle SDK 사용 예 (initialize → API 호출 → release)
 - `app/src/main/java/com/audeo/app/pleos/NaviProbe.kt`: NaviHelper SDK 사용 예 (결과는 리스너 콜백으로 수신)

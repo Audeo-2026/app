@@ -73,6 +73,8 @@ data class AudeoUiState(
     val busy: Boolean = false,
     val navi: NaviState = NaviState(),
     val location: String? = null,
+    /** 차 위치(지도 표시용). 위치 권한이 있을 때 몇 초마다 새로 읽어요. */
+    val car: GeoPoint? = null,
     val log: List<String> = emptyList(),
     val showStatus: Boolean = false,
     val server: ServerState = ServerState(),
@@ -225,11 +227,22 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
+    private var greeted = false
+
+    /** 앱을 켜고 처음 시작 화면이 뜨면 오디가 한 번 인사합니다. */
+    private fun greetOnce() {
+        if (greeted || live.value.scene != Scene.START || live.value.contacts.isEmpty()) return
+        greeted = true
+        val me = BuildConfig.AUDEO_DRIVER_SHORT_NAME.ifBlank { null }
+        say(if (me != null) "${me}님, 오늘 누구를 만나러 가나요?" else "오늘 누구를 만나러 가나요?", question = false)
+    }
+
     private suspend fun loadContacts() {
         try {
             val me = server.identity?.userId
             val contacts = server.contacts().filter { it.userId != me }
             live.update { it.copy(contacts = contacts, contactsLoading = false) }
+            greetOnce()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -350,7 +363,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
                         live.update { it.copy(voice = VoiceUi(VoiceMode.SPEAKING, caption = "“${call.peerCallName}께 전화하고 있어요”")) }
                         voice.speak("${call.peerCallName}께 전화할게요")
                     } else {
-                        val ask = "${call.peerCallName} 전화예요. AI와 함께 받을까요?"
+                        val ask = "${call.peerCallName} 전화예요. 제가 같이 들을까요?"
                         live.update { it.copy(voice = VoiceUi(VoiceMode.SPEAKING, caption = "“$ask”")) }
                         speakThenListen(ask)
                     }
@@ -523,6 +536,11 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     /** 제안의 선택지 하나를 고릅니다. 실행은 서버가 execution으로 다시 요청할 때 합니다. */
     fun choose(option: ProposalOption, viaVoice: Boolean = false) {
         val p = live.value.proposal ?: return
+        // 만날 곳·경유지처럼 탑승자가 정할 일은 운전자가 대신 고르지 않습니다(서버도 403으로 막아요).
+        if (!p.decidedByDriver) {
+            log("${p.kind}: 탑승자가 결정할 제안이라 운전자 답은 보내지 않아요")
+            return
+        }
         expectAnswer = false
         voice.stopAll()
         live.update { it.copy(busy = true, voice = null) }
@@ -564,7 +582,8 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             try {
                 val done = server.complete(j.id)
                 onJourneyEnded(done.id, done.status, done)
-                voice.speak("픽업을 마쳤어요. 위치 공유를 끝냈어요.")
+                val name = done.passengerCallName
+                say(if (name != null) "${name}이 탔어요. 좋은 시간 보내세요!" else "픽업을 마쳤어요. 좋은 시간 보내세요!", question = false)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -575,7 +594,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     fun notYet() {
         expectAnswer = false
-        voice.speak("알겠어요. 기다릴게요.")
+        say("알겠어요. 천천히 기다릴게요.", question = false)
     }
 
     /** 완료 화면이나 정리 중 화면에서 처음으로. */
@@ -805,6 +824,32 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     // ---------- 통화 음성(WebRTC)·받아쓰기 ----------
 
+    private val loudAt = LongArray(2)
+    private val talkingNow = MutableStateFlow(emptySet<String>())
+
+    /** 통화 중 지금 말하고 있는 사람("me", "peer"). 통화 카드의 초록 고리에 씁니다. 화면 상태와 따로 둬서 자주 바뀌어도 가볍습니다. */
+    val talking: StateFlow<Set<String>> = talkingNow.asStateFlow()
+
+    /** 10ms 음성 조각의 크기를 재서 말하는 중인지 정합니다(0.4초 동안 이어 봅니다). */
+    private fun hearLevel(channel: Int, pcm: ByteArray) {
+        var sum = 0.0
+        var n = 0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val v = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xff)).toShort().toInt()
+            sum += v.toDouble() * v
+            n++
+            i += 8
+        }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (n > 0 && kotlin.math.sqrt(sum / n) > 900.0) loudAt[channel] = now
+        val next = buildSet {
+            if (now - loudAt[0] < 400) add("me")
+            if (now - loudAt[1] < 400) add("peer")
+        }
+        if (next != talkingNow.value) talkingNow.value = next
+    }
+
     private val callAudio = CallAudio(app, object : CallAudio.Listener {
         override fun onLocalSignal(kind: String, payload: JSONObject) {
             val id = live.value.call?.id ?: return
@@ -820,8 +865,15 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             }
         }
 
-        override fun onLocalAudio(pcm: ByteArray, sampleRate: Int, channels: Int) = transcriber.feed("tx", pcm, sampleRate, channels)
-        override fun onRemoteAudio(pcm: ByteArray, sampleRate: Int, channels: Int) = transcriber.feed("rx", pcm, sampleRate, channels)
+        override fun onLocalAudio(pcm: ByteArray, sampleRate: Int, channels: Int) {
+            if (!live.value.muted) hearLevel(0, pcm)
+            transcriber.feed("tx", pcm, sampleRate, channels)
+        }
+
+        override fun onRemoteAudio(pcm: ByteArray, sampleRate: Int, channels: Int) {
+            hearLevel(1, pcm)
+            transcriber.feed("rx", pcm, sampleRate, channels)
+        }
         override fun onLog(message: String) {
             viewModelScope.launch(Dispatchers.Main) { log(message) }
         }
@@ -857,6 +909,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         earlySignals.clear()
         callAudio.close()
         transcriber.stop()
+        talkingNow.value = emptySet()
         live.update { it.copy(callAudioState = null) }
     }
 
@@ -935,13 +988,24 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             log("위치 권한 없음: 서버에는 내비 남은 거리만 보내요")
             return
         }
-        location.start(
-            onLocation = { d ->
-                lastLocation = d.latitude to d.longitude
-                live.update { it.copy(location = "%.5f, %.5f".format(d.latitude, d.longitude)) }
-            },
-            onError = ::log,
-        )
+        location.start(onLocation = { d -> onCarMoved(d.latitude, d.longitude) }, onError = ::log)
+        // 지도 위 차 표시를 따라가도록 몇 초마다 위치를 다시 읽습니다.
+        carWatch?.cancel()
+        carWatch = viewModelScope.launch {
+            while (isActive) {
+                delay(CAR_POLL_MS)
+                location.latest { d -> onCarMoved(d.latitude, d.longitude) }
+            }
+        }
+    }
+
+    private var carWatch: Job? = null
+
+    private fun onCarMoved(lat: Double, lng: Double) {
+        lastLocation = lat to lng
+        val p = GeoPoint(lat, lng)
+        if (live.value.car == p) return
+        live.update { it.copy(car = p, location = "%.5f, %.5f".format(lat, lng)) }
     }
 
     // ---------- 내비 이벤트 ----------
@@ -1116,6 +1180,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         const val TAG = "Audeo"
         const val LONG_POLL_SECONDS = 25
         const val STATUS_INTERVAL_MS = 15_000L
+        const val CAR_POLL_MS = 3_000L
         /** 내비 앱이 경로를 계산하고 안내 시작 카운트다운(약 5초)까지 끝내는 데 8~10초가 걸립니다. */
         const val NAVI_TIMEOUT_MS = 20_000L
         const val NAVI_LATE_MS = 40_000L

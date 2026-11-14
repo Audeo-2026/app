@@ -26,7 +26,7 @@ import androidx.compose.ui.unit.dp
 
 /**
  * Audeo 움직임. Tailwind UI 모달 전환과 같은 값을 씁니다.
- * - 나타날 때: ease-out 300ms, 투명도 0→1, 크기 95%→100%, 아래에서 살짝 올라옴(translate-y-4)
+ * - 나타날 때: ease-out 300ms, 투명도 0→1, 살짝 커지며 아래에서 올라옴
  * - 사라질 때: ease-in 200ms, 반대로
  * 운전 중 화면이라 튀는 움직임(바운스·회전)은 쓰지 않고, 짧고 차분하게 둡니다.
  */
@@ -43,18 +43,18 @@ object Motion {
     const val ENTER_MS = 300
     const val EXIT_MS = 200
 
-    /** 다이얼로그(모달) 등장. 기준점은 왼쪽 위(다이얼로그가 운전석 쪽 위에 붙어 있어서). */
+    /** 화면 아래 비서 시트: 아래에서 살짝 올라오며 나타나고, 내려가며 사라집니다. */
     @Composable
-    fun dialogEnter(): EnterTransition {
-        val rise = with(LocalDensity.current) { 24.dp.roundToPx() }
+    fun sheetEnter(): EnterTransition {
+        val rise = with(LocalDensity.current) { 32.dp.roundToPx() }
         return fadeIn(tween(ENTER_MS, easing = EaseOut)) +
-            scaleIn(tween(ENTER_MS, easing = EaseOut), initialScale = 0.95f, transformOrigin = TransformOrigin(0.1f, 0f)) +
+            scaleIn(tween(ENTER_MS, easing = EaseOut), initialScale = 0.97f, transformOrigin = TransformOrigin(0.5f, 1f)) +
             slideInVertically(tween(ENTER_MS, easing = EaseOut)) { rise }
     }
 
-    fun dialogExit(): ExitTransition =
+    fun sheetExit(): ExitTransition =
         fadeOut(tween(EXIT_MS, easing = EaseIn)) +
-            scaleOut(tween(EXIT_MS, easing = EaseIn), targetScale = 0.95f, transformOrigin = TransformOrigin(0.1f, 0f))
+            scaleOut(tween(EXIT_MS, easing = EaseIn), targetScale = 0.97f, transformOrigin = TransformOrigin(0.5f, 1f))
 
     /** 위에서 내려오는 띠(통화 바, 결과 배너). */
     fun barEnter(): EnterTransition =
@@ -66,13 +66,6 @@ object Motion {
         fadeOut(tween(EXIT_MS, easing = EaseIn)) +
             slideOutVertically(tween(EXIT_MS, easing = EaseIn)) { -it / 2 } +
             shrinkVertically(tween(EXIT_MS, easing = EaseIn), shrinkTowards = Alignment.Top)
-
-    /** 다이얼로그 안에서 생기고 없어지는 줄(음성 띠 등). */
-    fun rowEnter(): EnterTransition =
-        fadeIn(tween(ENTER_MS, easing = EaseOut)) + expandVertically(tween(ENTER_MS, easing = EaseOut), expandFrom = Alignment.Top)
-
-    fun rowExit(): ExitTransition =
-        fadeOut(tween(EXIT_MS, easing = EaseIn)) + shrinkVertically(tween(EXIT_MS, easing = EaseIn), shrinkTowards = Alignment.Top)
 }
 
 /** Tailwind `active:scale-95`처럼 누르는 동안 살짝 작아집니다. */

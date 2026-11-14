@@ -40,6 +40,12 @@
     <div class="voice" id="say" hidden><small>Audeo</small><span id="sayText"></span></div>
     <div class="actions" id="actions"></div>
   </div>
+  <div class="card" id="ask" hidden>
+    <div class="kicker" id="askKicker"></div>
+    <div class="title" id="askTitle"></div>
+    <div id="askRows"></div>
+    <div class="actions" id="askActions"></div>
+  </div>
   <div class="card"><div class="kicker">기록</div><div id="log"></div></div>
   <audio id="remote" autoplay playsinline></audio>
 </main>
@@ -112,9 +118,42 @@ function onEvent(e) {
       if (call && d.call_id === call.id) signalChain = signalChain.then(() => onSignal(d.kind, d.payload || {}));
       break;
     case 'agent.say': if (!d.role || d.role === 'passenger') { $('say').hidden = false; $('sayText').textContent = `“${d.text}”`; } break;
-    case 'proposal.created': if ((d.audience || []).includes('passenger')) log(`제안: ${d.kind} · ${d.title}`); break;
+    case 'proposal.created':
+    case 'proposal.updated': onProposal(d); break;
+    case 'journey.ended': $('ask').hidden = true; shownProposal = null; log('journey.ended'); break;
     default: if (e.type) log(e.type);
   }
+}
+
+// 제안 카드: 서버가 결정자를 탑승자(approver=passenger)로 정한 제안은 여기서 고릅니다.
+// 운전자가 정하는 제안은 내용만 보여 주고 버튼은 두지 않아요(탑승자가 고르면 서버가 403으로 막습니다).
+let shownProposal = null;
+function onProposal(d) {
+  // 결정이 끝난 제안은 받는 사람 목록과 상관없이 카드를 내립니다(업데이트에는 audience가 빠질 수 있어요).
+  if (d.status && d.status !== 'pending') {
+    if (shownProposal === d.id) { $('ask').hidden = true; shownProposal = null; log(`제안 ${d.kind} · ${d.title} → ${d.status}`); }
+    return;
+  }
+  if (!(d.audience || []).includes('passenger')) return;
+  const mine = d.approver === 'passenger';
+  shownProposal = d.id;
+  $('ask').hidden = false;
+  $('askKicker').textContent = mine ? '골라 주세요' : '운전자가 확인하고 있어요';
+  $('askTitle').textContent = d.question_by_role?.passenger || d.question || d.title;
+  $('askRows').innerHTML = (d.rows || []).map((r) => `<div class="row"><span>${r.label}</span><b>${r.from} → ${r.to}</b></div>`).join('');
+  $('askActions').innerHTML = '';
+  if (!mine) return;
+  (d.options || []).forEach((o) => {
+    const b = document.createElement('button');
+    b.textContent = o.label;
+    b.className = o.variant === 'primary' ? 'primary' : '';
+    b.onclick = async () => {
+      try { const r = await api('POST', `proposals/${d.id}/decision`, { option_id: o.id }); log(`내가 고름: ${o.label} → ${r.status}`); $('ask').hidden = true; }
+      catch (err) { log(`고르지 못했어요: ${err.message}`); }
+    };
+    $('askActions').appendChild(b);
+  });
+  log(`제안: ${d.kind} · ${d.title} (${mine ? '내가 결정' : '운전자가 결정'})`);
 }
 
 async function answer(consent) {

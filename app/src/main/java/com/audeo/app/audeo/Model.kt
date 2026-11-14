@@ -83,6 +83,9 @@ data class Contact(
 
 data class Place(val name: String, val latitude: Double, val longitude: Double)
 
+/** 지도에 그릴 한 점(위도, 경도). */
+data class GeoPoint(val lat: Double, val lng: Double)
+
 // ---------- 서버에서 오는 상태 ----------
 
 enum class CallStatus { RINGING, ACTIVE, ENDED }
@@ -126,7 +129,12 @@ data class Proposal(
     val footnote: String?,
     val voicePrompt: String?,
     val audience: List<String>,
-)
+    /** 이 제안을 결정할 사람(driver, passenger). 서버가 정하고, 다른 역할이 결정하면 403이 납니다. */
+    val approver: String? = null,
+) {
+    /** 운전자가 고르는 제안인지. 서버가 결정자를 탑승자로 정한 제안은 차에서는 지켜보기만 합니다. */
+    val decidedByDriver: Boolean get() = approver == null || approver == "driver"
+}
 
 /** 픽업 여정(서버의 journey). */
 data class Journey(

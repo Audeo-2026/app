@@ -157,6 +157,7 @@ object Protocol {
             footnote = o.str("footnote"),
             voicePrompt = o.str("voice_prompt"),
             audience = o.optJSONArray("audience")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty(),
+            approver = o.str("approver"),
         )
     }
 

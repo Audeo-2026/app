@@ -78,6 +78,7 @@ dependencies {
     implementation(libs.bundles.pleos.sdk)
     implementation(libs.okhttp)
     implementation(libs.webrtc)
+    implementation(libs.maplibre)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
