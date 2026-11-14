@@ -167,3 +167,23 @@ private fun DrawScope.chip(measurer: TextMeasurer, text: String, topLeft: Offset
     drawRoundRect(c.dialogLine, topLeft, Size(w, h), r, style = Stroke(2.dp.toPx()))
     drawText(layout, topLeft = Offset(topLeft.x + 20.dp.toPx(), topLeft.y + (h - layout.size.height) / 2))
 }
+
+/**
+ * 지도 그림(map_t2_day/night)과 같은 좌표계(0~1)의 길과 표시 위치.
+ * 지도는 인천공항 2터미널 고정 그림이라 실제 위치가 아니라 진행 정도를 보여 주는 용도입니다.
+ */
+object MapRoute {
+    /** 남쪽 도로에서 2터미널 3번 출구까지(지도 만들 때 OSM 도로로 계산한 길). */
+    val route = listOf(
+        MapPoint(0.74f, 1.04f), MapPoint(0.7581f, 1.0286f), MapPoint(0.7733f, 1.0137f), MapPoint(0.7872f, 0.9941f),
+        MapPoint(0.7975f, 0.9741f), MapPoint(0.806f, 0.9498f), MapPoint(0.8108f, 0.9272f), MapPoint(0.815f, 0.8681f),
+        MapPoint(0.8049f, 0.7587f), MapPoint(0.7568f, 0.4261f), MapPoint(0.7596f, 0.3993f), MapPoint(0.7848f, 0.3386f),
+        MapPoint(0.7853f, 0.3f), MapPoint(0.7788f, 0.2801f), MapPoint(0.77f, 0.2709f), MapPoint(0.7585f, 0.2681f),
+        MapPoint(0.74f, 0.27f),
+    )
+
+    /** 경로를 정하기 전(통화 중)에 차가 있는 곳. */
+    val idleRoute = listOf(MapPoint(0.8049f, 0.7587f), MapPoint(0.7568f, 0.4261f))
+
+    val passenger = MapPoint(0.8f, 0.2f)
+}
