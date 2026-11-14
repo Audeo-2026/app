@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -27,7 +28,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -44,7 +47,6 @@ import com.audeo.app.audeo.Scene
 import com.audeo.app.audeo.ServerState
 import com.audeo.app.audeo.ServerStatus
 import com.audeo.app.audeo.SourceKind
-import com.audeo.app.audeo.TestData
 import com.audeo.app.audeo.Tone
 import com.audeo.app.audeo.VoiceMode
 import com.audeo.app.audeo.VoiceUi
@@ -79,13 +81,13 @@ fun AudeoApp(vm: AudeoViewModel) {
             val idle = s.scene in IDLE_MAP
             val journey = s.journey ?: s.finished
             RouteMap(
-                route = if (idle) TestData.idleRoute else TestData.route,
+                route = if (idle) MapRoute.idleRoute else MapRoute.route,
                 progress = s.progress,
                 idle = idle,
                 pickupLabel = if (idle) null else journey?.meetPlace?.name?.let(::shortPlace) ?: "만날 곳",
                 etaLabel = etaChip(s),
                 passenger = if (s.scene == Scene.DRIVE || s.scene == Scene.ARRIVE) {
-                    TestData.passengerOnMap to (journey?.passengerCallName ?: "탑승자")
+                    MapRoute.passenger to (journey?.passengerCallName ?: "탑승자")
                 } else {
                     null
                 },
@@ -132,7 +134,7 @@ fun AudeoApp(vm: AudeoViewModel) {
                 }
                 SceneDialog(s, vm)
             }
-            DemoMenu(s, vm, Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.safeDrawing).padding(Space.s3))
+            DevPanel(s, vm, Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.safeDrawing).padding(Space.s3))
         }
     }
 }
@@ -147,13 +149,11 @@ private fun SceneDialog(s: AudeoUiState, vm: AudeoViewModel) {
             tone = Tone.BRAND,
             kicker = "Audeo 통화",
             title = "누구에게 전화할까요?",
-            voiceHint = s.contacts.firstOrNull()?.let { "“${it.callName.removeSuffix("님")}한테 전화해 줘”라고 말해도 돼요" },
             footnote = if (s.server.status == ServerStatus.OFFLINE) {
                 "Audeo 서버에 연결되지 않았어요. 연결되면 연락처와 통화를 다시 불러와요."
             } else {
-                "주행 중에는 연락처 검색을 막아 두고, 정차하면 열어요."
+                "상대가 AI 분석에 동의하면 통화 내용으로 픽업 약속을 정리해요."
             },
-            actions = { AudeoButton("연락처 검색", {}, icon = AudeoIcon.Search, enabled = false) },
         ) {
             when {
                 s.contacts.isNotEmpty() -> ContactRows(s.contacts, vm::callContact)
@@ -166,7 +166,6 @@ private fun SceneDialog(s: AudeoUiState, vm: AudeoViewModel) {
             tone = Tone.BRAND,
             kicker = if (call?.analysisRequested == true) "AI 분석 동의" else "Audeo 통화",
             title = if (call?.analysisRequested == true) "${peer}께 동의를 요청했어요" else "${peer}께 전화하고 있어요",
-            subtitle = "$peer 휴대폰의 Audeo 앱으로 보냈어요",
             voice = s.voice,
             footnote = "${peer}이 동의하면 바로 대화를 듣기 시작해요. 거절하면 일반 통화로 이어져요.",
             actions = if (call?.analysisRequested == true) {
@@ -190,7 +189,7 @@ private fun SceneDialog(s: AudeoUiState, vm: AudeoViewModel) {
             reasons = if (call?.peerConsent == "granted") listOf(Reason("${peer}은 AI 분석에 이미 동의했어요")) else emptyList(),
             voice = s.voice,
             voiceHint = "“받아”, “그냥 받아”, “거절해”라고 말해도 돼요",
-            footnote = "AI 분석은 통화가 끝나면 멈추고, 통화 중에도 끌 수 있어요.",
+            footnote = "AI 분석은 통화가 끝나면 멈춰요.",
             actions = {
                 AudeoButton("동의하고 받기", { vm.acceptIncoming(true) }, variant = ButtonVariant.PRIMARY, icon = AudeoIcon.Phone)
                 AudeoButton("그냥 받기", { vm.acceptIncoming(false) })
@@ -392,10 +391,13 @@ private fun etaChip(s: AudeoUiState): String? {
     return s.navi.remainSeconds?.let { "${ceil(it / 60.0).toInt()}분" }
 }
 
-/** 테스트용: 장면 이동, 낮/밤, SDK 상태, 최근 SDK 기록. */
+/**
+ * 개발 도구(낮/밤, SDK 상태, 서버 확인, 받아쓰기 시험, 최근 기록). 화면에 버튼은 두지 않고,
+ * 오른쪽 아래 모서리를 길게 누르면 열려요.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DemoMenu(s: AudeoUiState, vm: AudeoViewModel, modifier: Modifier = Modifier) {
+private fun DevPanel(s: AudeoUiState, vm: AudeoViewModel, modifier: Modifier = Modifier) {
     val c = Audeo.colors
     var open by remember { mutableStateOf(false) }
     Column(modifier, horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(Space.s2)) {
@@ -404,21 +406,18 @@ private fun DemoMenu(s: AudeoUiState, vm: AudeoViewModel, modifier: Modifier = M
                 Modifier.width(620.dp).floatingSurface().padding(Space.s3),
                 verticalArrangement = Arrangement.spacedBy(Space.s2),
             ) {
-                Text("미리보기 · 테스트 데이터로 장면 보기", style = AudeoType.label, color = c.inkMuted)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s1), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                    DemoChip("실제 화면", !s.previewing, vm::exitPreview)
-                    Scene.entries.forEach { scene -> DemoChip(scene.label, s.previewing && scene == s.scene) { vm.goTo(scene) } }
-                }
+                Text("개발 도구", style = AudeoType.label, color = c.inkMuted)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s1), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
                     val mode = when (s.nightOverride) {
                         null -> "낮/밤: 차량 따름"
                         true -> "낮/밤: 밤"
                         false -> "낮/밤: 낮"
                     }
-                    DemoChip(mode, false, vm::toggleNight)
-                    DemoChip("SDK 상태", false, vm::toggleStatus)
-                    DemoChip("서버 다시 확인", false, vm::checkServer)
-                    DemoChip("받아쓰기 시험", false, vm::testTranscription)
+                    DevChip(mode, vm::toggleNight)
+                    DevChip("SDK 상태", vm::toggleStatus)
+                    DevChip("서버 다시 확인", vm::checkServer)
+                    DevChip("받아쓰기 시험", vm::testTranscription)
+                    DevChip("닫기") { open = false }
                 }
                 Text(
                     serverLine(s.server),
@@ -433,17 +432,10 @@ private fun DemoMenu(s: AudeoUiState, vm: AudeoViewModel, modifier: Modifier = M
                 )
                 s.log.take(5).forEach { Text(it, style = AudeoType.label, color = c.inkMuted, maxLines = 1) }
             }
+        } else {
+            // 보이지 않는 모서리 영역: 길게 누르면 개발 도구를 엽니다.
+            Box(Modifier.size(Dimens.touchMin).pointerInput(Unit) { detectTapGestures(onLongPress = { open = true }) })
         }
-        AudeoButton(
-            when {
-                open -> "데모 닫기"
-                s.previewing -> "미리보기 중"
-                else -> "데모"
-            },
-            { open = !open },
-            size = ButtonSize.MD,
-            variant = if (s.previewing && !open) ButtonVariant.PRIMARY else ButtonVariant.SECONDARY,
-        )
     }
 }
 
@@ -454,17 +446,17 @@ private fun serverLine(server: ServerState): String = when (server.status) {
 }
 
 @Composable
-private fun DemoChip(text: String, selected: Boolean, onClick: () -> Unit) {
+private fun DevChip(text: String, onClick: () -> Unit) {
     val c = Audeo.colors
     Box(
         Modifier
             .height(56.dp)
             .clip(RoundedCornerShape(Dimens.touchMin / 2))
-            .background(if (selected) c.brandSoft else c.surface2)
+            .background(c.surface2)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = Space.s2),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = AudeoType.label, color = if (selected) c.brandInk else c.ink)
+        Text(text, style = AudeoType.label, color = c.ink)
     }
 }

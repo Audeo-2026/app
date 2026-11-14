@@ -23,10 +23,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -55,8 +53,6 @@ data class ServerState(
 
 data class AudeoUiState(
     val scene: Scene = Scene.START,
-    /** 데모 메뉴의 미리보기(테스트 데이터)를 보는 중. 버튼을 눌러도 실행하지 않습니다. */
-    val previewing: Boolean = false,
     /** null이면 차량의 낮/밤 모드를 따릅니다. 데모에서만 바꿉니다. */
     val nightOverride: Boolean? = null,
     val contacts: List<Contact> = emptyList(),
@@ -101,15 +97,12 @@ data class AudeoUiState(
  * - 통화·받아쓰기 분석·제안·조율은 Audeo 서버가 판단하고, 앱은 GET /events(long-poll)로 받아 화면을 바꿉니다.
  * - 운전자의 답(버튼·음성)은 서버에 결정으로 보냅니다. 서버가 실행을 요청하면 그때 Pleos SDK(내비·공조·시트)를 부르고,
  *   SDK 콜백으로 확인된 것만 성공으로 보고합니다.
- * - 통화 음성(WebRTC)은 아직 없어서, 통화가 연결되면 [TestData.callTranscript]를 받아쓰기처럼 서버에 보냅니다.
+ * - 통화 음성은 WebRTC로 탑승자와 직접 잇고, 두 사람이 AI 분석에 동의하면 통화 음성을 Pleos STT로 받아써 서버에 올립니다.
  */
 class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.Callbacks {
 
     private val live = MutableStateFlow(AudeoUiState())
-    private val previewScene = MutableStateFlow<Scene?>(null)
-
-    val state: StateFlow<AudeoUiState> = combine(live, previewScene) { s, p -> if (p == null) s else Preview.state(p, s) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, AudeoUiState())
+    val state: StateFlow<AudeoUiState> = live.asStateFlow()
 
     private val navi = NaviController(app)
     private val vehicle = VehicleController(app)
@@ -122,8 +115,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     private var eventJob: Job? = null
     private var statusJob: Job? = null
     private var statusJourneyId: String? = null
-    private var scriptJob: Job? = null
-    private var scriptCallId: String? = null
     private var callTimer: Job? = null
     private var thinkingJob: Job? = null
 
@@ -375,7 +366,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             }
             CallStatus.ENDED -> {
                 stopCallTimer()
-                stopScript()
                 stopCallAudio()
                 val missed = prev?.status == CallStatus.RINGING
                 live.update {
@@ -480,7 +470,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     // ---------- 운전자 행동 ----------
 
     fun callContact(contact: Contact) {
-        if (previewOnly()) return
         val userId = contact.userId ?: return
         viewModelScope.launch {
             live.update { it.copy(busy = true, result = null) }
@@ -519,7 +508,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     }
 
     private fun callAction(failure: String, block: suspend (CallInfo) -> CallInfo) {
-        if (previewOnly()) return
         val call = live.value.call ?: return
         viewModelScope.launch {
             try {
@@ -534,7 +522,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     /** 제안의 선택지 하나를 고릅니다. 실행은 서버가 execution으로 다시 요청할 때 합니다. */
     fun choose(option: ProposalOption, viaVoice: Boolean = false) {
-        if (previewOnly()) return
         val p = live.value.proposal ?: return
         expectAnswer = false
         voice.stopAll()
@@ -570,7 +557,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     /** '탔어요 · 픽업 완료'. 당사자가 누른 것이므로 서버가 바로 완료합니다. */
     fun boarded() {
-        if (previewOnly()) return
         val j = live.value.journey ?: return
         expectAnswer = false
         voice.stopAll()
@@ -588,14 +574,12 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     }
 
     fun notYet() {
-        if (previewOnly()) return
         expectAnswer = false
         voice.speak("알겠어요. 기다릴게요.")
     }
 
     /** 완료 화면이나 정리 중 화면에서 처음으로. */
     fun restart() {
-        if (previewOnly()) return
         live.value.journey?.takeIf { it.status == "draft" }?.let { dismissedDraftId = it.id }
         live.update { it.copy(finished = null, result = null, voice = null) }
         publish()
@@ -848,7 +832,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         onText = { channel, text -> viewModelScope.launch(Dispatchers.Main) { onTranscribed(channel, text) } },
         onLog = { m -> viewModelScope.launch(Dispatchers.Main) { log(m) } },
     )
-    private var transcriberError: String? = null
     private var utteranceSeq = 0L
     private var iceServers: List<com.audeo.app.server.IceServerInfo>? = null
     private val earlySignals = ArrayList<Pair<String, JSONObject>>()
@@ -880,15 +863,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     /** 두 사람 모두 AI 분석에 동의했을 때만 받아씁니다. 받아쓰기를 못 쓰면 테스트 대본으로 대신해요. */
     private fun updateTranscription(call: CallInfo) {
         when {
-            !call.analysisOn -> {
-                transcriber.stop()
-                stopScript()
-            }
+            !call.analysisOn -> transcriber.stop()
             transcriber.ready -> transcriber.start()
-            else -> {
-                log("받아쓰기 엔진이 없어 테스트 대본으로 대신해요 (${transcriberError ?: "준비 중"})")
-                startScript(call)
-            }
+            else -> log("받아쓰기 엔진이 준비되지 않아 이번 통화는 받아쓰지 않아요")
         }
     }
 
@@ -905,36 +882,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
-    // ---------- 통화(테스트 대본) ----------
-
-    /** 통화 음성이 붙기 전까지, 대본을 3초 간격으로 받아쓰기 결과처럼 서버에 보냅니다. */
-    private fun startScript(call: CallInfo) {
-        if (scriptCallId == call.id) return
-        scriptCallId = call.id
-        scriptJob?.cancel()
-        scriptJob = viewModelScope.launch {
-            // client_seq는 통화마다 1부터 셉니다(서버가 32비트 정수로 저장해요).
-            TestData.callTranscript.forEachIndexed { i, line ->
-                delay(3_000)
-                val who = if (line.channel == "rx") "${call.peerCallName}이 말하는 중" else "내가 말하는 중"
-                live.update { it.copy(voice = VoiceUi(VoiceMode.LISTENING, who = who, caption = "“${line.text}”")) }
-                try {
-                    server.utterances(call.id, listOf(Utterance(i + 1L, line.channel, line.text)))
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log("받아쓰기 전송 실패: ${e.message}")
-                }
-            }
-            delay(1_500)
-            live.update { it.copy(voice = VoiceUi(VoiceMode.IDLE, who = "테스트 대본을 모두 보냈어요", caption = "통화를 끝내면 계획을 만들어요")) }
-        }
-    }
-
-    private fun stopScript() {
-        scriptJob?.cancel()
-        scriptJob = null
-    }
+    // ---------- 통화 시간 ----------
 
     private fun startCallTimer() {
         callTimer?.cancel()
@@ -952,22 +900,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         callTimer = null
     }
 
-    // ---------- 미리보기·데모 ----------
-
-    /** 데모 메뉴: 테스트 데이터로 장면을 미리 봅니다. 서버 상태는 그대로 이어집니다. */
-    fun goTo(scene: Scene) {
-        previewScene.value = scene
-    }
-
-    fun exitPreview() {
-        previewScene.value = null
-    }
-
-    private fun previewOnly(): Boolean {
-        if (previewScene.value == null) return false
-        log("미리보기 화면이에요. 실제로 하려면 '실제 화면'으로 돌아가세요")
-        return true
-    }
+    // ---------- 개발 도구 ----------
 
     fun toggleNight() = live.update {
         it.copy(nightOverride = when (it.nightOverride) {
@@ -987,7 +920,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     fun testTranscription() {
         val pcm = runCatching { getApplication<Application>().assets.open("stt_selftest.pcm").use { it.readBytes() } }.getOrNull()
             ?: return log("시험 음성이 없어요(debug 빌드에만 있어요)")
-        if (!transcriber.ready) return log("받아쓰기 엔진이 준비되지 않았어요: ${transcriberError ?: "준비 중"}")
+        if (!transcriber.ready) return log("받아쓰기 엔진이 준비되지 않았어요")
         log("받아쓰기 시험 중… (${pcm.size / 32}ms)")
         viewModelScope.launch(Dispatchers.IO) {
             val started = System.currentTimeMillis()
@@ -1172,7 +1105,6 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         connectJob?.cancel()
         eventJob?.cancel()
         statusJob?.cancel()
-        scriptJob?.cancel()
         callTimer?.cancel()
         voice.release()
         navi.release()
