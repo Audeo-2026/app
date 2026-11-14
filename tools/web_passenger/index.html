@@ -233,7 +233,7 @@ function closePeer() {
 async function playScript() {
   for (let i = 1; i <= cfg.lines; i++) {
     if (!pc || pc.connectionState !== 'connected') return;
-    const buf = await ctx.decodeAudioData(await (await fetch(`audio/${cfg.scenario}/line${i}.wav`)).arrayBuffer());
+    const buf = await ctx.decodeAudioData(await (await fetch(cfg.files[i - 1])).arrayBuffer());
     $('speaking').hidden = false;
     $('line').textContent = `“${cfg.texts[i - 1]}”`;
     log(`말하기 ${i}: ${cfg.texts[i - 1]}`);

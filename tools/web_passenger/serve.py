@@ -29,25 +29,27 @@ PORT = int(os.environ.get("PORT", "8787"))
 REC_DIR = os.environ.get("AUDEO_REC_DIR", os.path.join(HERE, "recordings"))
 
 # 상황별로 탑승자가 통화에서 하는 말(차가 받아써서 서버 AI가 약속을 정리합니다). 페이지 주소의 ?scenario= 로 고릅니다.
+# 서버는 지금 시각과 만남 시각을 비교해(차가 늦으면 변경 제안, 만남이 가까우면 차량 준비 제안) 움직이므로,
+# 도착·만남 시각은 페이지를 열 때 지금 기준으로 정합니다: {arr} = 약 20분 뒤 도착, {meet} = 그 25분 뒤.
 SCENARIOS = {
     # 비 오고 추운 날 공항 픽업(기본)
     "cold": [
         "응, 나 오늘 인천공항으로 들어가.",
-        "대한항공 케이이 칠백십이 편 타고, 세 시 사십 분에 도착해.",
-        "제 이 터미널이야. 짐 찾고 나오면 네 시 십 분쯤 될 거야.",
+        "대한항공 케이이 칠백십이 편 타고, {arr}에 도착해.",
+        "제 이 터미널이야. 짐 찾고 나오면 {meet}쯤 될 거야.",
         "바깥 날씨가 많이 춥대. 차 안 따뜻하게 해 줘.",
     ],
     # 더운 날: 에어컨을 틀어 달라는 요청
     "hot": [
         "응, 나 오늘 인천공항으로 들어가.",
-        "대한항공 케이이 칠백십이 편 타고, 세 시 사십 분에 도착해.",
-        "제 이 터미널 삼번 출구로 나갈게. 네 시 십 분쯤 될 거야.",
+        "대한항공 케이이 칠백십이 편 타고, {arr}에 도착해.",
+        "제 이 터미널 삼번 출구로 나갈게. {meet}쯤 될 거야.",
         "오늘 날씨가 너무 덥대. 에어컨 좀 시원하게 틀어 줘.",
     ],
     # 비행기가 아니라 기차(KTX)
     "train": [
         "나 오늘 부산에서 케이티엑스 타고 서울역으로 올라가.",
-        "케이티엑스 이십사 열차고, 네 시 십오 분에 서울역 도착이야.",
+        "케이티엑스 이십사 열차고, {arr}에 서울역 도착이야.",
         "서울역 서부역 쪽으로 나갈게. 캐리어 하나 있어.",
         "오늘 좀 덥대. 차 안 시원하게 해 줘.",
     ],
@@ -55,9 +57,32 @@ SCENARIOS = {
 LINES = SCENARIOS["cold"]
 
 
+HOURS = ["열두", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟", "아홉", "열", "열한"]
+DIGITS = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
+
+
+def say_time(t):
+    """14:25 → '오후 두 시 이십오 분' (TTS가 읽기 좋게 한글로)."""
+    part = "오전" if t.hour < 12 else ("오후" if t.hour < 18 else "저녁")
+    m = t.minute
+    mins = "" if m == 0 else ((DIGITS[m // 10] if m >= 20 else "") + ("십" if m >= 10 else "") + DIGITS[m % 10] + " 분")
+    return f"{part} {HOURS[t.hour % 12]} 시 {mins}".strip()
+
+
+def timed_lines(name):
+    """지금 기준 도착·만남 시각을 넣은 대사."""
+    import datetime
+    now = datetime.datetime.now()
+    arr = now + datetime.timedelta(minutes=20)
+    arr = arr.replace(minute=(arr.minute // 5) * 5, second=0, microsecond=0)
+    meet = arr + datetime.timedelta(minutes=25)
+    return [l.format(arr=say_time(arr), meet=say_time(meet)) for l in SCENARIOS[name]], arr.strftime("%H%M")
+
+
 def ensure_audio():
-    for name, lines in SCENARIOS.items():
-        make_audio(os.path.join(HERE, "audio", name), lines)
+    for name in SCENARIOS:
+        lines, stamp = timed_lines(name)
+        make_audio(os.path.join(HERE, "audio", name, stamp), lines)
 
 
 def make_audio(out, lines):
@@ -100,8 +125,10 @@ class Handler(BaseHTTPRequestHandler):
             ws = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
             q = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
             name = q.get("scenario", "cold") if q.get("scenario") in SCENARIOS else "cold"
-            lines = SCENARIOS[name]
-            return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "lines": len(lines), "texts": lines}, ensure_ascii=False))
+            lines, stamp = timed_lines(name)
+            make_audio(os.path.join(HERE, "audio", name, stamp), lines)
+            files = [f"audio/{name}/{stamp}/line{i}.wav" for i in range(1, len(lines) + 1)]
+            return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "lines": len(lines), "texts": lines, "files": files}, ensure_ascii=False))
         path = self.path.split("?", 1)[0]
         name = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(HERE, name))

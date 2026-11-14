@@ -1,5 +1,8 @@
 package com.audeo.app.ui.audeo
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +27,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,9 +75,12 @@ fun AudeoDialog(
     body: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     val c = Audeo.colors
+    val lastVoice = remember { arrayOfNulls<VoiceUi>(1) }
     Column(
         modifier
             .width(Dimens.dialogW)
+            // 통화 중에 항목이 채워지는 등 높이가 바뀌면 부드럽게 늘어납니다.
+            .animateContentSize(tween(Motion.ENTER_MS, easing = Motion.EaseOut))
             .floatingSurface()
             .padding(Space.s5),
         verticalArrangement = Arrangement.spacedBy(Space.s4),
@@ -116,7 +123,11 @@ fun AudeoDialog(
             }
         }
         body?.invoke(this)
-        voice?.let { VoiceStrip(it) }
+        if (voice != null) lastVoice[0] = voice
+        val shownVoice = voice ?: lastVoice[0]
+        AnimatedVisibility(visible = voice != null, enter = Motion.rowEnter(), exit = Motion.rowExit()) {
+            shownVoice?.let { VoiceStrip(it) }
+        }
         if (actions != null) {
             FlowRow(
                 modifier = Modifier.padding(top = Space.s1),

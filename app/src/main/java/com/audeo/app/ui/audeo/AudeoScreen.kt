@@ -1,5 +1,11 @@
 package com.audeo.app.ui.audeo
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -79,11 +85,13 @@ fun AudeoApp(vm: AudeoViewModel) {
         }
         Box(Modifier.fillMaxSize().background(Audeo.colors.mapLand)) {
             val idle = s.scene in IDLE_MAP
+            // 지도 위 차는 장면이 바뀔 때 길을 따라 부드럽게 움직입니다.
+            val progress by animateFloatAsState(s.progress, tween(1500, easing = Motion.EaseInOut), label = "progress")
             val journey = s.journey ?: s.finished
             // 지도는 인천공항 2터미널 고정 그림이라, 만날 곳이 그 밖(예: 서울역)이면 그리지 않습니다.
             if (journey?.meetPlace?.let(::onMapImage) != false) RouteMap(
                 route = if (idle) MapRoute.idleRoute else MapRoute.route,
-                progress = s.progress,
+                progress = progress,
                 idle = idle,
                 pickupLabel = if (idle) null else journey?.meetPlace?.name?.let(::shortPlace) ?: "만날 곳",
                 etaLabel = etaChip(s),
@@ -101,7 +109,10 @@ fun AudeoApp(vm: AudeoViewModel) {
                     .padding(Space.s4),
                 verticalArrangement = Arrangement.spacedBy(Space.s3),
             ) {
-                s.call?.takeIf { it.status != CallStatus.ENDED }?.let { call ->
+                val liveCall = s.call?.takeIf { it.status != CallStatus.ENDED }
+                val shownCall = rememberLast(liveCall)
+                AnimatedVisibility(visible = liveCall != null, enter = Motion.barEnter(), exit = Motion.barExit()) {
+                    val call = shownCall ?: return@AnimatedVisibility
                     CallBar(
                         name = call.peerName,
                         role = when {
@@ -126,14 +137,25 @@ fun AudeoApp(vm: AudeoViewModel) {
                         onEnd = vm::endCall,
                     )
                 }
-                s.result?.let { result ->
+                val shownResult = rememberLast(s.result)
+                AnimatedVisibility(visible = s.result != null, enter = Motion.barEnter(), exit = Motion.barExit()) {
+                    val result = shownResult ?: return@AnimatedVisibility
                     ResultBanner(result, Modifier.width(Dimens.dialogW)) {
                         if (result.state != ResultState.PENDING) {
                             AudeoButton(null, vm::dismissResult, size = ButtonSize.MD, variant = ButtonVariant.QUIET, icon = AudeoIcon.Close, description = "닫기")
                         }
                     }
                 }
-                SceneDialog(s, vm)
+                // 장면(또는 제안)이 바뀔 때만 다이얼로그를 갈아끼우며 움직이고, 같은 장면 안의 내용 변화는 그대로 이어 그립니다.
+                // 나가는 다이얼로그는 그 순간의 상태로 고정해 두어, 사라지는 동안 다음 장면 내용이 비치지 않게 합니다.
+                val dialogEnter = Motion.dialogEnter()
+                AnimatedContent(
+                    targetState = DialogFrame(dialogKey(s), s),
+                    contentKey = { it.key },
+                    contentAlignment = Alignment.TopStart,
+                    transitionSpec = { dialogEnter togetherWith Motion.dialogExit() using SizeTransform(clip = false) },
+                    label = "dialog",
+                ) { frame -> SceneDialog(frame.state, vm) }
             }
             DevPanel(s, vm, Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.safeDrawing).padding(Space.s3))
         }
@@ -381,6 +403,19 @@ private fun consentField(peer: String, consent: String?) = when (consent) {
     "granted" -> PlanField(peer, value = "동의함", updated = true)
     "declined", "denied" -> PlanField(peer, value = "동의 안 함 · 일반 통화")
     else -> PlanField(peer, placeholder = "응답 기다리는 중", source = SourceKind.CONFIRM)
+}
+
+private class DialogFrame(val key: String, val state: AudeoUiState)
+
+private fun dialogKey(s: AudeoUiState): String = "${s.scene}|${s.proposal?.id.orEmpty()}|${s.call?.status ?: "none"}"
+
+/** 사라지는 애니메이션 동안 마지막 값을 계속 그리려고 기억해 둡니다(상태가 아니라 다시 그리기를 일으키지 않음). */
+@Composable
+private fun <T : Any> rememberLast(value: T?): T? {
+    val holder = remember { arrayOfNulls<Any>(1) }
+    if (value != null) holder[0] = value
+    @Suppress("UNCHECKED_CAST")
+    return holder[0] as T?
 }
 
 /** "인천공항 2터미널 3번 출구" → "3번 출구"처럼 지도 칩에 맞게 줄입니다. */

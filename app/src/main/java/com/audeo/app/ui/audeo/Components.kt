@@ -8,7 +8,15 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -106,11 +115,13 @@ fun AudeoButton(
         iconOnly -> m.width(size.height)
         else -> m
     }
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = m
+            .pressScale(interaction)
             .clip(shape)
             .background(bg)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .clickable(interactionSource = interaction, indication = LocalIndication.current, enabled = enabled, role = Role.Button, onClick = onClick)
             .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier)
             .padding(horizontal = if (iconOnly) 0.dp else size.padding),
         horizontalArrangement = Arrangement.spacedBy(Space.s2, Alignment.CenterHorizontally),
@@ -261,7 +272,16 @@ fun VoiceStrip(voice: VoiceUi, modifier: Modifier = Modifier) {
         VoiceOrb(voice.mode)
         Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
             Text(who, style = AudeoType.bodySm, color = if (speaking) c.brandInk else c.inkMuted)
-            voice.caption?.let { Text(it, style = AudeoType.bodyLg.copy(fontWeight = FontWeight.SemiBold), color = c.ink) }
+            // 들은 말·할 말이 바뀌면 문장을 부드럽게 바꿔 끼웁니다.
+            AnimatedContent(
+                targetState = voice.caption,
+                transitionSpec = {
+                    (fadeIn(tween(Motion.ENTER_MS, easing = Motion.EaseOut)) + slideInVertically(tween(Motion.ENTER_MS, easing = Motion.EaseOut)) { it / 3 }) togetherWith
+                        fadeOut(tween(Motion.EXIT_MS, easing = Motion.EaseIn))
+                },
+                contentAlignment = Alignment.TopStart,
+                label = "caption",
+            ) { caption -> caption?.let { Text(it, style = AudeoType.bodyLg.copy(fontWeight = FontWeight.SemiBold), color = c.ink) } }
             voice.hint?.let { Text(it, style = AudeoType.bodySm, color = c.inkMuted) }
         }
     }
