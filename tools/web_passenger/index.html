@@ -78,7 +78,7 @@ function actions(list) {
 }
 
 async function start() {
-  cfg = await (await fetch('/config.json')).json();
+  cfg = await (await fetch('/config.json?scenario=' + (params.get('scenario') || 'cold'))).json();
   me = await api('GET', 'devices/me');
   last = (await api('GET', 'events?after_seq=0&wait_s=0')).last_seq || 0;
   headline(`${me.user.name} · 전화를 기다리는 중`);
@@ -233,7 +233,7 @@ function closePeer() {
 async function playScript() {
   for (let i = 1; i <= cfg.lines; i++) {
     if (!pc || pc.connectionState !== 'connected') return;
-    const buf = await ctx.decodeAudioData(await (await fetch(`audio/line${i}.wav`)).arrayBuffer());
+    const buf = await ctx.decodeAudioData(await (await fetch(`audio/${cfg.scenario}/line${i}.wav`)).arrayBuffer());
     $('speaking').hidden = false;
     $('line').textContent = `“${cfg.texts[i - 1]}”`;
     log(`말하기 ${i}: ${cfg.texts[i - 1]}`);

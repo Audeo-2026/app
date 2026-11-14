@@ -9,6 +9,7 @@
 
   python3 tools/web_passenger/serve.py            # http://127.0.0.1:8787/?auto=1
   내 목소리로: http://127.0.0.1:8787/?mic=1 (이어폰 권장), 통화 녹음: &record=1
+  상황 고르기: &scenario=cold(기본, 추운 날 공항) | hot(더운 날 에어컨) | train(KTX 서울역)
 토큰은 tools/fake_passenger.py register 로 만든 tools/.fake_passenger.json 을 씁니다.
 """
 import json
@@ -27,19 +28,41 @@ PORT = int(os.environ.get("PORT", "8787"))
 # ?record=1 로 녹음한 통화 음성을 저장할 곳
 REC_DIR = os.environ.get("AUDEO_REC_DIR", os.path.join(HERE, "recordings"))
 
-# 탑승자가 통화에서 하는 말(차가 받아써서 서버 AI가 약속을 정리합니다).
-LINES = [
-    "응, 나 오늘 인천공항으로 들어가.",
-    "대한항공 케이이 칠백십이 편 타고, 세 시 사십 분에 도착해.",
-    "제 이 터미널이야. 짐 찾고 나오면 네 시 십 분쯤 될 거야.",
-    "바깥 날씨가 많이 춥대. 차 안 따뜻하게 해 줘.",
-]
+# 상황별로 탑승자가 통화에서 하는 말(차가 받아써서 서버 AI가 약속을 정리합니다). 페이지 주소의 ?scenario= 로 고릅니다.
+SCENARIOS = {
+    # 비 오고 추운 날 공항 픽업(기본)
+    "cold": [
+        "응, 나 오늘 인천공항으로 들어가.",
+        "대한항공 케이이 칠백십이 편 타고, 세 시 사십 분에 도착해.",
+        "제 이 터미널이야. 짐 찾고 나오면 네 시 십 분쯤 될 거야.",
+        "바깥 날씨가 많이 춥대. 차 안 따뜻하게 해 줘.",
+    ],
+    # 더운 날: 에어컨을 틀어 달라는 요청
+    "hot": [
+        "응, 나 오늘 인천공항으로 들어가.",
+        "대한항공 케이이 칠백십이 편 타고, 세 시 사십 분에 도착해.",
+        "제 이 터미널 삼번 출구로 나갈게. 네 시 십 분쯤 될 거야.",
+        "오늘 날씨가 너무 덥대. 에어컨 좀 시원하게 틀어 줘.",
+    ],
+    # 비행기가 아니라 기차(KTX)
+    "train": [
+        "나 오늘 부산에서 케이티엑스 타고 서울역으로 올라가.",
+        "케이티엑스 이십사 열차고, 네 시 십오 분에 서울역 도착이야.",
+        "서울역 서부역 쪽으로 나갈게. 캐리어 하나 있어.",
+        "오늘 좀 덥대. 차 안 시원하게 해 줘.",
+    ],
+}
+LINES = SCENARIOS["cold"]
 
 
 def ensure_audio():
-    out = os.path.join(HERE, "audio")
+    for name, lines in SCENARIOS.items():
+        make_audio(os.path.join(HERE, "audio", name), lines)
+
+
+def make_audio(out, lines):
     os.makedirs(out, exist_ok=True)
-    for i, text in enumerate(LINES, 1):
+    for i, text in enumerate(lines, 1):
         wav = os.path.join(out, f"line{i}.wav")
         if os.path.exists(wav):
             continue
@@ -73,9 +96,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/"):
             return self._proxy("GET")
-        if self.path == "/config.json":
+        if self.path.startswith("/config.json"):
             ws = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
-            return self._send(200, json.dumps({"ws": ws, "token": token(), "lines": len(LINES), "texts": LINES}, ensure_ascii=False))
+            q = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
+            name = q.get("scenario", "cold") if q.get("scenario") in SCENARIOS else "cold"
+            lines = SCENARIOS[name]
+            return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "lines": len(lines), "texts": lines}, ensure_ascii=False))
         path = self.path.split("?", 1)[0]
         name = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(HERE, name))

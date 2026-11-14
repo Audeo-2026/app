@@ -80,7 +80,8 @@ fun AudeoApp(vm: AudeoViewModel) {
         Box(Modifier.fillMaxSize().background(Audeo.colors.mapLand)) {
             val idle = s.scene in IDLE_MAP
             val journey = s.journey ?: s.finished
-            RouteMap(
+            // 지도는 인천공항 2터미널 고정 그림이라, 만날 곳이 그 밖(예: 서울역)이면 그리지 않습니다.
+            if (journey?.meetPlace?.let(::onMapImage) != false) RouteMap(
                 route = if (idle) MapRoute.idleRoute else MapRoute.route,
                 progress = s.progress,
                 idle = idle,
@@ -383,6 +384,13 @@ private fun consentField(peer: String, consent: String?) = when (consent) {
 }
 
 /** "인천공항 2터미널 3번 출구" → "3번 출구"처럼 지도 칩에 맞게 줄입니다. */
+/** 지도 그림이 담은 곳(인천공항 2터미널 주변 약 5km) 안인지. */
+private fun onMapImage(p: com.audeo.app.audeo.Place): Boolean {
+    val dLat = (p.latitude - 37.4602) * 111.0
+    val dLng = (p.longitude - 126.4407) * 88.0
+    return dLat * dLat + dLng * dLng < 25.0
+}
+
 private fun shortPlace(name: String): String = name.split(" ").takeLast(2).joinToString(" ").take(12)
 
 private fun etaChip(s: AudeoUiState): String? {
