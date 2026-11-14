@@ -12,9 +12,11 @@
     <!-- Vehicle SDK: 첫 화면의 누적 주행거리 읽기 -->
     <uses-permission android:name="pleos.car.permission.CAR_DRIVE" />
 
-    <!-- NaviHelper SDK: 경로 요청·경유지·경로 상태 -->
+    <!-- NaviHelper SDK: 조회(get*·requestTrip)는 NAVI_ROUTE, 경로 요청·경유지·취소는 NAVI_ROUTE_SEARCH,
+         내비 화면 전환(requestNavigationScreen)은 NAVI_CUSTOM_MAP -->
     <uses-permission android:name="pleos.car.permission.NAVI_ROUTE" />
     <uses-permission android:name="pleos.car.permission.NAVI_ROUTE_SEARCH" />
+    <uses-permission android:name="pleos.car.permission.NAVI_CUSTOM_MAP" />
 
     <!-- TextToSpeech / SpeechToText SDK -->
     <uses-permission android:name="pleos.car.permission.TTS_SERVICE" />
@@ -22,6 +24,15 @@
 
     <!-- FusedLocation SDK: dangerous 등급이라 위치를 쓰기 전에 실행 중 권한 요청이 필요합니다. -->
     <uses-permission android:name="pleos.car.permission.FUSED_LOCATION" />
+
+    <!-- Vehicle SDK: 탑승자 맞이 준비(공조 온도·시트 열선) 읽기와 제어 -->
+    <uses-permission android:name="pleos.car.permission.CAR_CLIMATE" />
+    <uses-permission android:name="pleos.car.permission.CONTROL_CAR_CLIMATE" />
+    <uses-permission android:name="pleos.car.permission.CAR_SEATS" />
+    <uses-permission android:name="pleos.car.permission.CONTROL_CAR_SEATS" />
+
+    <!-- Audeo 서버 -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
@@ -33,6 +44,10 @@
         <activity
             android:name=".MainActivity"
             android:exported="true">
+            <!-- 주행 중에도 쓰는 화면(Distraction Optimized). 실제 배포 전 Pleos 심사가 필요합니다. -->
+            <meta-data
+                android:name="distractionOptimized"
+                android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
