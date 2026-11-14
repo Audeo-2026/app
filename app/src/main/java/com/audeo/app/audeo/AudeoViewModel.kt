@@ -136,7 +136,8 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     private val execViews = LinkedHashMap<String, ExecView>()
     private var execGroup: String? = null
 
-    private data class PendingNavi(val executionId: String, val stop: Boolean, val place: Place)
+    /** 응답을 기다리는 내비 요청. 대기 시간이 지나 unknown으로 보고한 뒤에도, 늦게 확인되면 성공으로 고쳐 보고합니다. */
+    private data class PendingNavi(val executionId: String, val stop: Boolean, val place: Place, val timedOut: Boolean = false)
     private var pendingNavi: PendingNavi? = null
     private var naviTimeout: Job? = null
 
@@ -635,10 +636,13 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         naviTimeout?.cancel()
         naviTimeout = viewModelScope.launch {
             delay(NAVI_TIMEOUT_MS)
-            if (pendingNavi?.executionId == x.id) {
-                pendingNavi = null
+            val p = pendingNavi
+            if (p?.executionId == x.id) {
+                pendingNavi = p.copy(timedOut = true)
                 showExec(x.id, ExecState.UNKNOWN, "내비게이션 응답을 확인하지 못했어요")
                 report(x, "unknown", "no navi callback in ${NAVI_TIMEOUT_MS / 1000}s")
+                delay(NAVI_LATE_MS)
+                if (pendingNavi?.executionId == x.id) pendingNavi = null
             }
         }
     }
@@ -647,6 +651,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         val p = pendingNavi ?: return
         pendingNavi = null
         naviTimeout?.cancel()
+        if (p.timedOut) log("내비 응답이 늦게 왔어요: 성공으로 다시 보고해요")
         val n = live.value.navi
         val observed = JSONObject().putOpt("remain_s", n.remainSeconds).putOpt("remain_m", n.remainMeters)
         showExec(p.executionId, ExecState.SUCCESS, if (p.stop) "${p.place.name}을 경유지로 넣었어요" else "${p.place.name}로 길안내를 시작했어요")
@@ -1040,7 +1045,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         const val TAG = "Audeo"
         const val LONG_POLL_SECONDS = 25
         const val STATUS_INTERVAL_MS = 15_000L
-        const val NAVI_TIMEOUT_MS = 10_000L
+        /** 내비 앱이 경로를 계산하고 안내 시작 카운트다운(약 5초)까지 끝내는 데 8~10초가 걸립니다. */
+        const val NAVI_TIMEOUT_MS = 20_000L
+        const val NAVI_LATE_MS = 40_000L
         const val VEHICLE_TIMEOUT_MS = 8_000L
         const val BANNER_MS = 10_000L
         val TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
