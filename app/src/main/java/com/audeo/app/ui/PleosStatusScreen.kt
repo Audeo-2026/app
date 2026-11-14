@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -26,6 +27,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.audeo.app.MainUiState
 import com.audeo.app.MainViewModel
+import com.audeo.app.pleos.NaviTest
 import com.audeo.app.pleos.PleosSdk
 import com.audeo.app.pleos.ServiceStatus
 
@@ -33,12 +35,16 @@ import com.audeo.app.pleos.ServiceStatus
 fun PleosStatusScreen(viewModel: MainViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     Surface(modifier = Modifier.fillMaxSize()) {
-        PleosStatusContent(state = state, onRefresh = viewModel::refresh)
+        PleosStatusContent(state = state, onRefresh = viewModel::refresh, onNaviTest = viewModel::runNaviTest)
     }
 }
 
 @Composable
-private fun PleosStatusContent(state: MainUiState, onRefresh: () -> Unit) {
+private fun PleosStatusContent(
+    state: MainUiState,
+    onRefresh: () -> Unit,
+    onNaviTest: (NaviTest) -> Unit,
+) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -63,6 +69,7 @@ private fun PleosStatusContent(state: MainUiState, onRefresh: () -> Unit) {
                 Button(onClick = onRefresh) { Text("다시 확인") }
             }
         }
+        item { NaviTestCard(events = state.naviEvents, onNaviTest = onNaviTest) }
         items(state.services, key = { it.sdk }) { status ->
             val liveResult = when (status.sdk) {
                 PleosSdk.VEHICLE -> state.vehicleResult
@@ -99,6 +106,26 @@ private fun ServiceCard(status: ServiceStatus, liveResult: String?) {
             liveResult?.let {
                 Text(it, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(top = 8.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun NaviTestCard(events: List<String>, onNaviTest: (NaviTest) -> Unit) {
+    Card(modifier = Modifier.widthIn(max = 960.dp).fillMaxWidth()) {
+        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("내비 화면 시험", style = MaterialTheme.typography.titleLarge)
+            NaviTest.entries.chunked(3).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { test ->
+                        OutlinedButton(onClick = { onNaviTest(test) }) { Text(test.label) }
+                    }
+                }
+            }
+            if (events.isEmpty()) {
+                Text("버튼을 누르면 요청과 내비 이벤트가 여기에 쌓입니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            events.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
         }
     }
 }

@@ -1,4 +1,14 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+/** Audeo 서버 주소와 키는 local.properties(커밋 안 됨) 또는 환경 변수에서 읽습니다. */
+val localProps = Properties().apply {
+    // Properties.load(InputStream)은 ISO-8859-1로 읽어서 한글이 깨집니다. UTF-8 Reader로 읽어요.
+    rootProject.file("local.properties").takeIf { it.exists() }?.reader(Charsets.UTF_8)?.use { load(it) }
+}
+
+fun localOrEnv(key: String, env: String, default: String = ""): String =
+    localProps.getProperty(key) ?: System.getenv(env) ?: default
 
 plugins {
     alias(libs.plugins.android.application)
@@ -17,6 +27,18 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        // Audeo 서버(v1). 초대 코드로 차량 기기를 등록하고, 받은 기기 토큰으로 나머지 API를 부릅니다.
+        val server = mapOf(
+            "AUDEO_API_BASE_URL" to localOrEnv("audeo.api.baseUrl", "AUDEO_API_BASE_URL", "https://audeo.mosslab.dev/api/v1/"),
+            "AUDEO_INVITE_CODE" to localOrEnv("audeo.inviteCode", "AUDEO_INVITE_CODE", localProps.getProperty("audeo.api.key") ?: ""),
+            "AUDEO_DRIVER_NAME" to localOrEnv("audeo.driver.name", "AUDEO_DRIVER_NAME", "운전자"),
+            "AUDEO_DRIVER_SHORT_NAME" to localOrEnv("audeo.driver.shortName", "AUDEO_DRIVER_SHORT_NAME"),
+            "AUDEO_DRIVER_PHONE" to localOrEnv("audeo.driver.phone", "AUDEO_DRIVER_PHONE"),
+            "AUDEO_VEHICLE_LABEL" to localOrEnv("audeo.vehicle.label", "AUDEO_VEHICLE_LABEL", "Pleos Connect"),
+            "AUDEO_PLATE_NUMBER" to localOrEnv("audeo.vehicle.plate", "AUDEO_PLATE_NUMBER"),
+        )
+        server.forEach { (name, value) -> buildConfigField("String", name, "\"${value.replace("\"", "\\\"")}\"") }
     }
 
     buildTypes {
@@ -36,6 +58,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -53,6 +76,8 @@ kotlin {
 
 dependencies {
     implementation(libs.bundles.pleos.sdk)
+    implementation(libs.okhttp)
+    implementation(libs.webrtc)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
