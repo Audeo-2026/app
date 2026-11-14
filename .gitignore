@@ -21,3 +21,4 @@ tools/.fake_passenger.json
 
 # 테스트 탑승자 페이지가 만드는 음성 파일
 tools/web_passenger/audio/
+tools/web_passenger/recordings/

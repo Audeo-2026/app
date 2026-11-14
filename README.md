@@ -79,6 +79,9 @@ python3 tools/fake_passenger.py late 10    # 진행 중 여정에 "10분 늦어"
 python3 tools/web_passenger/serve.py   # http://127.0.0.1:8787/?auto=1 (전화가 오면 동의하고 받고, 한국어 대사를 통화로 말해요)
 ```
 
+- 내 목소리로 통화하기: `http://127.0.0.1:8787/?mic=1` (Chrome 마이크를 통화로 보내요. 이어폰을 끼세요)
+- 통화 음성 녹음: `&record=1`을 붙이면 통화가 끝날 때 `tools/web_passenger/recordings/`(또는 `AUDEO_REC_DIR`)에 webm으로 저장해요
+
 에뮬레이터와 연결되려면 Chrome을 `--disable-features=WebRtcHideLocalIpsWithMdns`로 열어야 합니다(로컬 IP를 mDNS로 숨기면 에뮬레이터가 못 찾아요).
 
 차량 준비 제안과 도착 화면은 차가 픽업 지점에 가까워져야(남은 거리·시간) 서버가 보냅니다. 에뮬레이터 차는 움직이지 않으니, 확인하려면 같은 운전자의 다른 기기 토큰으로 가까운 상태를 한 번 보내 주세요.
