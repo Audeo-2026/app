@@ -10,7 +10,9 @@ import com.audeo.app.call.CallTranscriber
 import com.audeo.app.pleos.LocationController
 import com.audeo.app.pleos.NaviController
 import com.audeo.app.pleos.NaviEvent
+import com.audeo.app.pleos.GearNotParkException
 import com.audeo.app.pleos.UnsupportedFeatureException
+import com.audeo.app.pleos.VehicleTimeoutException
 import com.audeo.app.pleos.VehicleController
 import com.audeo.app.pleos.VoiceController
 import com.audeo.app.server.AudeoServer
@@ -20,6 +22,7 @@ import com.audeo.app.server.ServerEvent
 import com.audeo.app.server.Utterance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,6 +72,8 @@ data class AudeoUiState(
     /** 방금 끝난 여정. 완료 화면에 씁니다. */
     val finished: Journey? = null,
     val voice: VoiceUi? = null,
+    /** 서버가 방금 실제로 한 판단(생각 줄). 몇 초 보여 주고 사라져요. */
+    val thinking: ThinkingUi? = null,
     val result: ActionResult? = null,
     val busy: Boolean = false,
     val navi: NaviState = NaviState(),
@@ -338,6 +343,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
                     publish()
                 }
             }
+            is ServerEvent.Thinking -> if (fresh(e, 30)) onThinking(e)
             is ServerEvent.Say -> if (fresh(e, 30)) say(e.text, question = e.priority == "question" && e.proposalId != null)
             is ServerEvent.RtcSignal -> when {
                 e.callId != live.value.call?.id -> log("다른 통화의 신호: ${e.kind}")
@@ -346,6 +352,31 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
                 else -> earlySignals.add(e.kind to e.payload)
             }
             is ServerEvent.Other -> log("이벤트: ${e.type}")
+        }
+    }
+
+    private val thinkingQueue = ArrayDeque<ThinkingUi>()
+    private var thinkingShow: Job? = null
+
+    /** 생각 줄은 하나씩 차례로 보여 줍니다(겹치면 줄을 서요). 자막 강조는 지금 보이는 자막에 그 말이 있을 때만. */
+    private fun onThinking(e: ServerEvent.Thinking) {
+        if (e.highlights.isNotEmpty()) {
+            live.update { s ->
+                val v = s.voice
+                if (v?.caption != null && e.highlights.any { v.caption.contains(it) }) s.copy(voice = v.copy(highlights = e.highlights)) else s
+            }
+        }
+        if (e.steps.isEmpty()) return
+        log("생각: ${e.steps.joinToString(" → ")}")
+        thinkingQueue.addLast(ThinkingUi(e.steps, e.highlights, e.seq))
+        if (thinkingShow?.isActive == true) return
+        thinkingShow = viewModelScope.launch {
+            while (thinkingQueue.isNotEmpty()) {
+                val t = thinkingQueue.removeFirst()
+                live.update { it.copy(thinking = t) }
+                delay(THINKING_BASE_MS + t.steps.size * THINKING_STEP_MS)
+            }
+            live.update { it.copy(thinking = null) }
         }
     }
 
@@ -414,6 +445,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         live.update { it.copy(journey = j, finished = null) }
         if (j.status in DRIVING_STATUSES) {
             startStatusReports(j.id)
+            watchMeetPlace(j)
             if (live.value.coordination == null) {
                 viewModelScope.launch { runCatching { server.coordination(j.id) }.getOrNull()?.let { c -> live.update { it.copy(coordination = c) }; publish() } }
             }
@@ -623,27 +655,15 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         when (val c = x.command) {
             is CarCommand.Route -> runNavi(x, c.place, stop = false)
             is CarCommand.AddStop -> runNavi(x, c.place, stop = true)
-            is CarCommand.CabinTemperature -> {
-                val t = "%.0f".format(c.celsius)
-                showExec(x.id, ExecState.PENDING, "실내 온도 $t°")
-                log("Vehicle HVAC.setHvacTemperature ${t}°C ${c.area ?: ""}")
-                vehicle.setCabinTemperature(c.celsius, c.area) { r ->
-                    viewModelScope.launch(Dispatchers.Main) {
-                        finishVehicle(x, r, "실내 온도를 $t°로 맞췄어요", "공조 온도를 바꾸지 못했어요", "이 차는 공조 온도 조절을 지원하지 않아요")
+            is CarCommand.VehicleOp -> {
+                showExec(x.id, ExecState.PENDING, c.label)
+                log("Vehicle ${c.op} ${c.args.optString("area")}")
+                viewModelScope.launch {
+                    val r = vehicle.execute(c.op, c.args)
+                    withContext(Dispatchers.Main) {
+                        finishVehicle(x, r, c.done ?: "${c.label}을 바꿨어요", "${c.label} 설정이 적용되지 않았어요", "${c.label}은 이 차에서 지원하지 않아 직접 바꿔 주세요")
                     }
                 }
-                vehicleTimeout(x)
-            }
-            is CarCommand.SeatHeat -> {
-                val seat = seatLabel(c.area)
-                showExec(x.id, ExecState.PENDING, "$seat 열선 ${c.level}단")
-                log("Vehicle Seat.setHvacSeatTemperature ${c.level}단 ${c.area ?: ""}")
-                vehicle.setSeatHeat(c.level, c.area) { r ->
-                    viewModelScope.launch(Dispatchers.Main) {
-                        finishVehicle(x, r, "$seat 열선을 ${c.level}단으로 켰어요", "$seat 열선을 켜지 못했어요", "$seat 열선은 지원하지 않아 직접 켜 주세요")
-                    }
-                }
-                vehicleTimeout(x)
             }
             is CarCommand.Unsupported -> {
                 showExec(x.id, ExecState.FAILED, "이 앱이 모르는 명령이에요 (${c.target} ${c.op})")
@@ -698,6 +718,14 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             e is UnsupportedFeatureException -> {
                 showExec(x.id, ExecState.FAILED, unsupported)
                 report(x, "failed", "unsupported: ${e.message}")
+            }
+            e is GearNotParkException -> {
+                showExec(x.id, ExecState.FAILED, "차가 P단일 때만 문을 열어요")
+                report(x, "failed", "GEAR_NOT_PARK")
+            }
+            e is VehicleTimeoutException -> {
+                showExec(x.id, ExecState.UNKNOWN, "차량 응답을 확인하지 못했어요")
+                report(x, "unknown", "no vehicle callback")
             }
             else -> {
                 showExec(x.id, ExecState.FAILED, failure)
@@ -790,7 +818,30 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
+    private var watchedArrival: String? = null
+
+    /** FusedLocation 근접 알림: 만날 곳 300m 안에 들어오면 바로 상태를 보내 서버가 '곧 도착'을 띄우게 합니다. */
+    private fun watchMeetPlace(j: Journey) {
+        val place = j.meetPlace ?: return
+        val key = "${j.id}:${place.latitude},${place.longitude}"
+        if (watchedArrival == key) return
+        watchedArrival = key
+        location.watchArrival(
+            place,
+            ARRIVAL_RADIUS_M,
+            onEnter = {
+                viewModelScope.launch {
+                    log("FusedLocation 근접 알림: ${place.name} ${ARRIVAL_RADIUS_M.toInt()}m 안")
+                    reportStatus(j.id, trigger = "proximity_enter")
+                }
+            },
+            onError = ::log,
+        )
+    }
+
     private fun stopStatusReports() {
+        watchedArrival = null
+        location.clearArrival()
         statusJob?.cancel()
         statusJob = null
         statusJourneyId = null
@@ -804,11 +855,14 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         return statusSeq
     }
 
-    private suspend fun reportStatus(journeyId: String) {
+    private suspend fun reportStatus(journeyId: String, trigger: String? = null) {
         val n = live.value.navi
         val body = JSONObject()
             .put("client_seq", nextStatusSeq())
             .put("observed_at", Instant.now().toString())
+        // Vehicle SDK로 읽은 차 상태(실내 온도·공조·열선·창문·문·기어·착석·벨트). 서버가 상황 규칙에 씁니다.
+        runCatching { vehicle.state() }.getOrNull()?.takeIf { it.length() > 0 }?.let { body.put("vehicle", it) }
+        trigger?.let { body.put("extra", JSONObject().put("trigger", it)) }
         lastLocation?.let { (lat, lng) -> body.put("location", JSONObject().put("lat", lat).put("lng", lng)) }
         if (n.remainMeters != null || n.remainSeconds != null) {
             body.put("navi", JSONObject().putOpt("remain_m", n.remainMeters).putOpt("remain_s", n.remainSeconds))
@@ -1180,6 +1234,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         const val TAG = "Audeo"
         const val LONG_POLL_SECONDS = 25
         const val STATUS_INTERVAL_MS = 15_000L
+        const val ARRIVAL_RADIUS_M = 300f
+        const val THINKING_BASE_MS = 1_400L
+        const val THINKING_STEP_MS = 700L
         const val CAR_POLL_MS = 3_000L
         /** 내비 앱이 경로를 계산하고 안내 시작 카운트다운(약 5초)까지 끝내는 데 8~10초가 걸립니다. */
         const val NAVI_TIMEOUT_MS = 20_000L

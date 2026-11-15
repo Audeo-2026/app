@@ -38,6 +38,9 @@ sealed interface ServerEvent {
     /** Audeo가 운전자에게 말할 문장. priority: question이면 말한 뒤 답을 듣습니다. */
     data class Say(override val seq: Long, override val at: Instant?, val text: String, val priority: String?, val proposalId: String?) : ServerEvent
 
+    /** 서버가 이번에 실제로 한 판단(화면의 '생각' 줄)과 통화 자막에서 강조할 말. */
+    data class Thinking(override val seq: Long, override val at: Instant?, val steps: List<String>, val highlights: List<String>) : ServerEvent
+
     /** 상대 기기가 보낸 WebRTC 신호(offer, answer, ice, hangup). WebSocket으로만 오고 seq가 없습니다. */
     data class RtcSignal(override val seq: Long, override val at: Instant?, val callId: String, val kind: String, val payload: JSONObject, val from: String?) : ServerEvent
     data class Other(override val seq: Long, override val at: Instant?, val type: String) : ServerEvent
@@ -125,6 +128,7 @@ object Protocol {
     fun source(s: String?): SourceKind? = when (s) {
         "conversation" -> SourceKind.CONVERSATION
         "lookup" -> SourceKind.LOOKUP
+        "demo" -> SourceKind.DEMO
         "estimate" -> SourceKind.ESTIMATE
         "confirm", "unconfirmed" -> SourceKind.CONFIRM
         "user" -> SourceKind.USER
@@ -197,6 +201,8 @@ object Protocol {
     private fun thinTicks(ticks: List<String>): List<String> =
         if (ticks.size <= 3) ticks else listOf(ticks.first(), ticks[ticks.size / 2], ticks.last())
 
+    private val VEHICLE_TARGETS = setOf("hvac", "seat", "window", "door", "steering")
+
     fun execution(o: JSONObject): Execution {
         val target = o.str("target").orEmpty()
         val cmd = o.optJSONObject("command") ?: JSONObject()
@@ -211,8 +217,8 @@ object Protocol {
                     else -> CarCommand.Route(place)
                 }
             }
-            op == "setHvacTemperature" -> CarCommand.CabinTemperature(cmd.str("area"), cmd.optDouble("celsius", 24.0).toFloat())
-            op == "setHvacSeatTemperature" -> CarCommand.SeatHeat(cmd.str("area"), cmd.optInt("level", 1))
+            target in VEHICLE_TARGETS && op.startsWith("set") ->
+                CarCommand.VehicleOp(target, op, cmd, cmd.str("label") ?: op, cmd.str("done"))
             else -> CarCommand.Unsupported(target, op)
         }
         return Execution(
@@ -241,6 +247,11 @@ object Protocol {
                 "coordination.updated" -> ServerEvent.CoordinationUpdated(seq, at, o.str("journey_id"), coordination(d))
                 "rtc.signal" -> ServerEvent.RtcSignal(
                     seq, at, d.str("call_id").orEmpty(), d.str("kind").orEmpty(), d.optJSONObject("payload") ?: JSONObject(), d.str("from"),
+                )
+                "agent.thinking" -> ServerEvent.Thinking(
+                    seq, at,
+                    d.optJSONArray("steps")?.let { a -> (0 until a.length()).mapNotNull { a.optString(it).ifEmpty { null } } }.orEmpty(),
+                    d.optJSONArray("highlights")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.str("text") } }.orEmpty(),
                 )
                 "agent.say" -> if (d.str("role") == null || d.str("role") == "driver") {
                     ServerEvent.Say(seq, at, d.str("text").orEmpty(), d.str("priority"), d.str("proposal_id"))

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.WindowInsets
@@ -109,6 +110,11 @@ fun AudeoApp(vm: AudeoViewModel) {
                 AnimatedVisibility(visible = liveCall != null, enter = Motion.barEnter(), exit = Motion.barExit()) {
                     val call = shownCall ?: return@AnimatedVisibility
                     CallCard(call, s, talking, vm)
+                }
+                val shownThinking = rememberLast(s.thinking)
+                AnimatedVisibility(visible = s.thinking != null, enter = Motion.barEnter(), exit = Motion.barExit()) {
+                    val t = shownThinking ?: return@AnimatedVisibility
+                    ThinkingPanel(t, Modifier.width(860.dp))
                 }
                 val shownResult = rememberLast(s.result)
                 AnimatedVisibility(visible = s.result != null, enter = Motion.barEnter(), exit = Motion.barExit()) {
@@ -342,7 +348,7 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
             AssistantSheet(
                 maxHeight = maxHeight,
                 kicker = "픽업 완료",
-                speech = if (name != null) "${name}이 탔어요. 좋은 시간 보내세요!" else "픽업을 마쳤어요. 좋은 시간 보내세요!",
+                speech = if (name != null) "오늘도 잘 만났어요. ${name}과 좋은 시간 보내세요!" else "오늘도 잘 만났어요. 좋은 시간 보내세요!",
                 subtitle = "위치 공유와 조율 알림은 모두 껐어요.",
                 voice = s.voice,
                 question = "다음은",
@@ -576,5 +582,37 @@ private fun DevChip(text: String, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(text, style = AudeoType.label, color = c.ink)
+    }
+}
+
+
+/**
+ * 오디의 생각 줄: 서버가 이번에 실제로 한 판단(대화에서 들은 것 → 조회 → 제안)을 한 줄씩 차례로 보여 줍니다.
+ * 연출용 문구가 아니라 서버 처리 기록(agent.thinking)이에요.
+ */
+@Composable
+private fun ThinkingPanel(t: com.audeo.app.audeo.ThinkingUi, modifier: Modifier = Modifier) {
+    val c = Audeo.colors
+    var shown by remember(t.id) { mutableIntStateOf(0) }
+    androidx.compose.runtime.LaunchedEffect(t.id) {
+        shown = 0
+        repeat(t.steps.size) {
+            kotlinx.coroutines.delay(450)
+            shown = it + 1
+        }
+    }
+    Column(
+        modifier.floatingSurface().padding(horizontal = Space.s4, vertical = Space.s3),
+        verticalArrangement = Arrangement.spacedBy(Space.s2),
+    ) {
+        Text("오디가 확인한 것", style = AudeoType.label, color = c.inkMuted)
+        t.steps.forEachIndexed { i, step ->
+            AnimatedVisibility(visible = i < shown, enter = Motion.barEnter()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(12.dp).clip(androidx.compose.foundation.shape.CircleShape).background(if (i == t.steps.lastIndex) c.brand else c.brandInk.copy(alpha = 0.5f)))
+                    Text(step, style = AudeoType.body, color = c.ink, maxLines = 2)
+                }
+            }
+        }
     }
 }

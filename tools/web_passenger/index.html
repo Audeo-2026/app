@@ -7,6 +7,7 @@
 <style>
   :root { --ground:#f2f3f5; --surface:#fff; --surface2:#e7e9ed; --line:#cdd2d9; --dialog:#8d95a0; --ink:#0e1013; --muted:#525a65; --brand:#2347f5; --brand-ink:#1f3fd8; --caution:#8a5600; --danger:#b8261a; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }  /* .card 의 display:flex 가 hidden 을 덮지 않게 */
   body { margin:0; background:var(--ground); color:var(--ink); font:16px/1.45 "Apple SD Gothic Neo", system-ui, sans-serif; }
   main { max-width:420px; margin:0 auto; padding:24px 16px; display:flex; flex-direction:column; gap:16px; }
   h1 { margin:0; font-size:28px; color:var(--brand-ink); }
@@ -24,6 +25,12 @@
   button.primary { background:var(--brand); color:#fff; }
   button.danger { background:var(--danger); color:#fff; }
   .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .compass { display:flex; flex-direction:column; align-items:center; gap:8px; padding:8px 0; }
+  .dial { width:220px; height:220px; border-radius:50%; background:var(--surface2); position:relative; display:flex; align-items:center; justify-content:center; }
+  .dial .n { position:absolute; top:8px; font:600 13px system-ui; color:var(--muted); }
+  #arrow { width:0; height:0; border-left:34px solid transparent; border-right:34px solid transparent; border-bottom:120px solid var(--brand); transform-origin:50% 66%; transition:transform .25s ease-out; }
+  .dist { font:700 40px system-ui; color:var(--ink); }
+  .hint { font-size:14px; color:var(--muted); text-align:center; }
   #log { font:12px/1.5 ui-monospace, Menlo, monospace; color:var(--muted); white-space:pre-wrap; max-height:220px; overflow:auto; }
 </style>
 </head>
@@ -45,6 +52,16 @@
     <div class="title" id="askTitle"></div>
     <div id="askRows"></div>
     <div class="actions" id="askActions"></div>
+  </div>
+  <div class="card" id="compassCard" hidden>
+    <div class="kicker">차 찾기</div>
+    <div class="title" id="compassTitle">차가 있는 방향</div>
+    <div class="compass">
+      <div class="dial"><span class="n">N</span><div id="arrow"></div></div>
+      <div class="dist" id="dist">-</div>
+      <div class="hint" id="compassHint">휴대폰을 평평하게 들고 화살표 쪽으로 걸어가세요</div>
+    </div>
+    <div class="actions" id="compassActions"></div>
   </div>
   <div class="card"><div class="kicker">기록</div><div id="log"></div></div>
   <audio id="remote" autoplay playsinline></audio>
@@ -89,6 +106,8 @@ async function start() {
   last = (await api('GET', 'events?after_seq=0&wait_s=0')).last_seq || 0;
   headline(`${me.user.name} · 전화를 기다리는 중`);
   connect();
+  // 이미 확정된 픽업이 있으면 바로 '차 찾기'를 띄웁니다(페이지를 늦게 연 경우).
+  try { const open = (await api('GET', 'journeys?status=planned,active')).journeys || []; if (open[0]) showCompass(open[0].id); } catch (err) { log('여정 확인 실패: ' + err.message); }
 }
 
 function connect() {
@@ -120,7 +139,10 @@ function onEvent(e) {
     case 'agent.say': if (!d.role || d.role === 'passenger') { $('say').hidden = false; $('sayText').textContent = `“${d.text}”`; } break;
     case 'proposal.created':
     case 'proposal.updated': onProposal(d); break;
-    case 'journey.ended': $('ask').hidden = true; shownProposal = null; log('journey.ended'); break;
+    case 'journey.ended': $('ask').hidden = true; shownProposal = null; stopCompass(); log('journey.ended'); break;
+    case 'journey.updated':
+      if (['planned', 'active'].includes(d.status) && d.id) showCompass(d.id);
+      break;
     default: if (e.type) log(e.type);
   }
 }
@@ -291,6 +313,75 @@ async function playScript() {
 }
 
 start().catch((e) => { headline('시작하지 못했어요'); log(e.message); });
+
+// ── 차 찾기 나침반 ──
+// 차 위치: 서버 GET /journeys/{id}/car (차량 앱이 FusedLocation 으로 15초마다 보고한 위치, 위치 공유 중에만)
+// 내 위치·방향: 휴대폰 Geolocation · DeviceOrientation. 휴대폰 센서는 HTTPS(또는 localhost)에서만 열려요.
+// 컴퓨터에서 시험할 때는 ?here=위도,경도 로 내 위치를 정할 수 있어요(방향은 북쪽 고정).
+let compassJourney = null, carPos = null, myPos = null, heading = 0, carTimer = null, geoWatch = null;
+const here = (params.get('here') || '').split(',').map(Number);
+function showCompass(jid) {
+  if (compassJourney === jid) return;
+  compassJourney = jid;
+  $('compassCard').hidden = false;
+  const list = [['방향 접근 허용', 'primary', enableSensors]];
+  $('compassActions').innerHTML = '';
+  list.forEach(([label, cls, fn]) => { const b = document.createElement('button'); b.textContent = label; b.className = cls; b.onclick = fn; $('compassActions').appendChild(b); });
+  if (here.length === 2 && !here.some(isNaN)) myPos = { lat: here[0], lng: here[1] };
+  pollCar();
+  carTimer = setInterval(pollCar, 3000);
+}
+function stopCompass() {
+  compassJourney = null; $('compassCard').hidden = true;
+  clearInterval(carTimer); if (geoWatch != null) navigator.geolocation.clearWatch(geoWatch); geoWatch = null;
+}
+async function enableSensors() {
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      if (await DeviceOrientationEvent.requestPermission() !== 'granted') throw new Error('방향 권한 거절');
+    }
+    window.addEventListener('deviceorientationabsolute', onOrientation, true);
+    window.addEventListener('deviceorientation', onOrientation, true);
+  } catch (err) { log('방향 센서: ' + err.message); }
+  if (navigator.geolocation && !(here.length === 2 && !here.some(isNaN))) {
+    geoWatch = navigator.geolocation.watchPosition(
+      (p) => { myPos = { lat: p.coords.latitude, lng: p.coords.longitude }; draw(); },
+      (err) => log('위치: ' + err.message), { enableHighAccuracy: true, maximumAge: 2000 });
+  }
+  $('compassActions').innerHTML = '';
+}
+function onOrientation(e) {
+  if (e.webkitCompassHeading != null) heading = e.webkitCompassHeading;        // iOS: 북쪽 기준 시계 방향
+  else if (e.absolute && e.alpha != null) heading = (360 - e.alpha) % 360;       // Android: alpha 는 반시계
+  draw();
+}
+async function pollCar() {
+  if (!compassJourney) return;
+  try {
+    const r = await api('GET', `journeys/${compassJourney}/car`);
+    carPos = r.car;
+    $('compassTitle').textContent = r.meet_place?.name ? `${r.meet_place.name} · 차가 있는 방향` : '차가 있는 방향';
+    draw();
+  } catch (err) { if (String(err.message).startsWith('409')) stopCompass(); }
+}
+const rad = (d) => d * Math.PI / 180;
+function distanceM(a, b) {
+  const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lng - a.lng) / 2) ** 2;
+  return 6371000 * 2 * Math.asin(Math.sqrt(h));
+}
+function bearing(a, b) {
+  const y = Math.sin(rad(b.lng - a.lng)) * Math.cos(rad(b.lat));
+  const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(rad(b.lng - a.lng));
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+function draw() {
+  if (!carPos) { $('dist').textContent = '-'; $('compassHint').textContent = '차 위치를 기다리는 중'; return; }
+  if (!myPos) { $('dist').textContent = '-'; $('compassHint').textContent = '‘방향 접근 허용’을 누르면 내 위치로 방향을 알려 드려요'; return; }
+  const d = distanceM(myPos, carPos);
+  $('dist').textContent = d >= 1000 ? `${(d / 1000).toFixed(1)}km` : `${Math.round(d / 10) * 10}m`;
+  $('arrow').style.transform = `rotate(${bearing(myPos, carPos) - heading}deg)`;
+  $('compassHint').textContent = d < 30 ? '차가 바로 앞에 있어요' : '화살표 쪽으로 걸어가세요';
+}
 </script>
 </body>
 </html>

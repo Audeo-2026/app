@@ -140,6 +140,7 @@ fun SourceTag(kind: SourceKind, label: String? = null) {
     val (bg, fg) = when (kind) {
         SourceKind.CONVERSATION -> c.surface2 to c.ink
         SourceKind.LOOKUP -> c.brandSoft to c.brandInk
+        SourceKind.DEMO -> c.cautionSoft to c.caution
         SourceKind.ESTIMATE -> Color.Transparent to c.inkMuted
         SourceKind.CONFIRM -> c.cautionSoft to c.caution
         SourceKind.USER -> c.surface2 to c.ink

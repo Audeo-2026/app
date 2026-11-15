@@ -19,6 +19,8 @@ enum class Scene(val label: String) {
 enum class SourceKind(val label: String) {
     CONVERSATION("대화"),
     LOOKUP("조회"),
+    /** 실제 API가 아닌 시연 시간표·예시 값. 조회처럼 보이지 않게 따로 표시해요. */
+    DEMO("시연 데이터"),
     ESTIMATE("추정"),
     CONFIRM("확인 필요"),
     USER("직접 입력"),
@@ -61,11 +63,16 @@ data class EtaLane(val who: String, val at: String, val note: String? = null, va
 
 enum class VoiceMode { LISTENING, SPEAKING, THINKING, IDLE }
 
+/** 서버가 실제로 한 판단(생각 줄)과 자막에서 강조할 말. */
+data class ThinkingUi(val steps: List<String>, val highlights: List<String>, val id: Long)
+
 data class VoiceUi(
     val mode: VoiceMode,
     val who: String? = null,
     val caption: String? = null,
     val hint: String? = null,
+    /** 자막에서 강조할 말(서버가 근거로 든 구절). */
+    val highlights: List<String> = emptyList(),
 )
 
 enum class ResultState { SUCCESS, FAILED, PENDING }
@@ -172,8 +179,8 @@ data class Coordination(
 sealed interface CarCommand {
     data class Route(val place: Place) : CarCommand
     data class AddStop(val place: Place) : CarCommand
-    data class CabinTemperature(val area: String?, val celsius: Float) : CarCommand
-    data class SeatHeat(val area: String?, val level: Int) : CarCommand
+    /** 공조·시트·창문·문. [op]는 Vehicle SDK 메서드 이름 그대로(setHvacAc, setDoorPosition …), [args]는 area·on·level·position 등. */
+    data class VehicleOp(val target: String, val op: String, val args: org.json.JSONObject, val label: String, val done: String?) : CarCommand
     data class Unsupported(val target: String, val op: String) : CarCommand
 }
 

@@ -243,10 +243,23 @@ private fun VoiceLine(voice: VoiceUi?) {
             targetState = voice.caption,
             transitionSpec = { fadeIn(tween(Motion.ENTER_MS, easing = Motion.EaseOut)) togetherWith fadeOut(tween(Motion.EXIT_MS, easing = Motion.EaseIn)) },
             label = "voiceLine",
-        ) { cap -> cap?.let { Text(it, style = AudeoType.body.copy(fontWeight = FontWeight.SemiBold), color = c.ink, maxLines = 2) } }
+        ) { cap -> cap?.let { Text(highlighted(it, voice.highlights, c.cautionSoft, c.caution), style = AudeoType.body.copy(fontWeight = FontWeight.SemiBold), color = c.ink, maxLines = 2) } }
         voice.hint?.let { Text(it, style = AudeoType.bodySm, color = c.inkMuted) }
     }
 }
+
+/** 서버가 근거로 든 구절(예: '광명 지나', '오늘 좀 춥네')을 자막에서 형광펜처럼 칠합니다. */
+internal fun highlighted(text: String, marks: List<String>, bg: Color, fg: Color): androidx.compose.ui.text.AnnotatedString =
+    androidx.compose.ui.text.buildAnnotatedString {
+        append(text)
+        marks.filter { it.isNotBlank() }.forEach { m ->
+            var i = text.indexOf(m)
+            while (i >= 0) {
+                addStyle(androidx.compose.ui.text.SpanStyle(background = bg, color = fg, fontWeight = FontWeight.Bold), i, i + m.length)
+                i = text.indexOf(m, i + m.length)
+            }
+        }
+    }
 
 @Composable
 private fun ListeningDots(color: Color) {
