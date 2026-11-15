@@ -8,9 +8,9 @@
 
 | 구성 | 저장소 | 역할 |
 | --- | --- | --- |
-| 차량 앱 | `Audeo-2026/audeo-app` (이 저장소) | 운전자 화면, 통화, Pleos SDK(내비·차량·STT/TTS·위치) 실행 |
+| 차량 앱 | `Audeo-2026/app` (이 저장소) | 운전자 화면, 통화, Pleos SDK(내비·차량·STT/TTS·위치) 실행 |
 | AI 오케스트레이션 서버 | `Audeo-2026/audeo-server` | 통화 신호, 대화 분석(LLM), 여정·제안·조율, 시연 탑승자 |
-| 탑승자 앱 | `Audeo-2026/audio-app-passenger` | 탑승자 휴대폰(Android·iOS). 통화 수신·분석 동의, 제안 응답, 지도, 차 찾기 나침반 |
+| 탑승자 앱 | `Audeo-2026/app-passenger` | 탑승자 휴대폰(Android·iOS). 통화 수신·분석 동의, 제안 응답, 지도, 차 찾기 나침반 |
 
 ## APK
 
@@ -74,7 +74,7 @@ adb install -r apk/Audeo_Audeo_release.apk
 
 ### 실제 사람과 통화하기 (선택)
 
-탑승자 앱(`Audeo-2026/audio-app-passenger`)을 휴대폰에 설치하고 같은 초대 코드로 등록하면, 차량 연락처에 그 사람이 나타납니다. 통화 음성은 WebRTC로 차와 휴대폰을 직접 잇고, 두 사람이 모두 동의하면 차에서 Pleos STT로 받아써서 서버로 보냅니다.
+탑승자 앱(`Audeo-2026/app-passenger`)을 휴대폰에 설치하고 같은 초대 코드로 등록하면, 차량 연락처에 그 사람이 나타납니다. 통화 음성은 WebRTC로 차와 휴대폰을 직접 잇고, 두 사람이 모두 동의하면 차에서 Pleos STT로 받아써서 서버로 보냅니다.
 
 ## 테스트 환경 및 필요한 설정
 

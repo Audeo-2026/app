@@ -115,7 +115,7 @@ Pleos 에뮬레이터(cold boot)에 release APK를 설치하고 아래가 모두
 
 ---
 
-## 탑승자 앱 담당(`audio-app-passenger`)에게 같이 전할 것
+## 탑승자 앱 담당(`app-passenger`)에게 같이 전할 것
 
 - `ask` 제안은 `audience = ["driver","passenger"]`, `approver = null`이에요. 서버는 **둘 중 누구의 답이든** 받아요. 지금 탑승자 앱은 `approver == "passenger"`일 때만 버튼을 보여 줘서, 탑승자에게 온 질문이 버튼 없이 "운전자가 확인하고 있어요"로 떠요. `approver == null && "passenger" in audience`일 때도 버튼을 보여 주세요(`ui/Screens.kt` `ProposalCard`).
 - 만날 곳이 바뀌는 `change`에 `also_confirm == "passenger"`가 있으면 탑승자에게 "확인했어요" 정도의 확인을 보여 주면 기획서 ⑦과 맞아요.
