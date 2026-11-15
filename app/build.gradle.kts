@@ -34,7 +34,7 @@ android {
         // Audeo 서버(v1). 초대 코드로 차량 기기를 등록하고, 받은 기기 토큰으로 나머지 API를 부릅니다.
         val server = mapOf(
             "AUDEO_API_BASE_URL" to localOrEnv("audeo.api.baseUrl", "AUDEO_API_BASE_URL", "https://audeo.mosslab.dev/api/v1/"),
-            "AUDEO_INVITE_CODE" to localOrEnv("audeo.inviteCode", "AUDEO_INVITE_CODE", localProps.getProperty("audeo.api.key") ?: ""),
+            "AUDEO_INVITE_CODE" to localOrEnv("audeo.inviteCode", "AUDEO_INVITE_CODE", localProps.getProperty("audeo.api.key") ?: "audeo"),
             "AUDEO_DRIVER_NAME" to localOrEnv("audeo.driver.name", "AUDEO_DRIVER_NAME", "운전자"),
             "AUDEO_DRIVER_SHORT_NAME" to localOrEnv("audeo.driver.shortName", "AUDEO_DRIVER_SHORT_NAME"),
             "AUDEO_DRIVER_PHONE" to localOrEnv("audeo.driver.phone", "AUDEO_DRIVER_PHONE"),
