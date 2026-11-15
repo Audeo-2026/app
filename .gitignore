@@ -23,3 +23,6 @@ tools/.fake_passenger.json
 tools/web_passenger/audio/
 tools/web_passenger/recordings/
 tools/web_passenger/__pycache__/
+
+# 제출용 APK 는 커밋한다
+!apk/*.apk

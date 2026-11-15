@@ -28,6 +28,9 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
+        // Pleos Connect 에뮬레이터 이미지(Mac arm64, Windows·Linux x86_64)에 필요한 것만 넣어 APK 크기를 줄인다.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+
         // Audeo 서버(v1). 초대 코드로 차량 기기를 등록하고, 받은 기기 토큰으로 나머지 API를 부릅니다.
         val server = mapOf(
             "AUDEO_API_BASE_URL" to localOrEnv("audeo.api.baseUrl", "AUDEO_API_BASE_URL", "https://audeo.mosslab.dev/api/v1/"),
@@ -41,8 +44,22 @@ android {
         server.forEach { (name, value) -> buildConfigField("String", name, "\"${value.replace("\"", "\\\"")}\"") }
     }
 
+    // 제출용 release 서명. local.properties(audeo.release.*) 또는 환경 변수에 키가 없으면 debug 키로 서명해서라도 설치되게 한다.
+    val releaseStore = localOrEnv("audeo.release.storeFile", "AUDEO_RELEASE_STORE_FILE")
+    signingConfigs {
+        if (releaseStore.isNotEmpty()) {
+            create("release") {
+                storeFile = file(releaseStore)
+                storePassword = localOrEnv("audeo.release.storePassword", "AUDEO_RELEASE_STORE_PASSWORD")
+                keyAlias = localOrEnv("audeo.release.keyAlias", "AUDEO_RELEASE_KEY_ALIAS", "audeo")
+                keyPassword = localOrEnv("audeo.release.keyPassword", "AUDEO_RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
