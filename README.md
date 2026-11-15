@@ -33,12 +33,13 @@ FusedLocation SDK가 `android.hardware.type.automotive`를 필수 기능으로 �
 
 휴대폰이 함께 연결돼 있으면 `ANDROID_SERIAL=emulator-5554 ./gradlew installDebug`처럼 에뮬레이터를 지정하세요.
 
-첫 화면은 Audeo 차량 화면입니다. 앱 영역을 지도로 채우고, 아래에는 AI 비서 캐릭터 '오디'가 말하는 시트를 둡니다.
+첫 화면은 Audeo 차량 화면입니다. 앱 영역을 지도로 채우고, 왼쪽 아래에 AI 비서 캐릭터 '오디'와 비서 시트를 둡니다.
 
-- 오디(`ui/audeo/Mascot.kt`): 그림 파일 없이 코드로 그린 캐릭터. 말할 때 입이 움직이고, 들을 때 안테나에서 물결이 퍼지고, 생각할 때 눈웃음을 지어요.
-- 비서 시트(`ui/audeo/Sheet.kt`): 왼쪽은 오디의 말(말풍선)과 근거·내용, 오른쪽은 고를 수 있는 길을 의사결정 트리처럼 펼치고 고르면 어떻게 되는지 함께 적어요.
+- 오디(`ui/audeo/Mascot.kt`): Gemini(나노바나나 2)로 만든 표정 네 장(`res/drawable-nodpi/odi_idle·talk·listen·think.png`, 흰 배경을 투명하게 바꿈). 말할 때는 기본·입 벌린 표정을 불규칙하게 오가고, 들을 때는 귀 기울이는 표정에 안테나 물결, 생각할 때는 눈웃음이에요. 둥실 떠 있는 움직임과 발밑 그림자는 코드로 그려요.
+- 비서 시트(`ui/audeo/Sheet.kt`): 운전을 방해하지 않도록 평소에는 오디와 한 줄(접힘)로만 보여요. 운전자가 직접 골라야 할 때(누구에게 전화할지, 전화 받기, 운전자 몫의 제안, 탑승 확인)만 펼쳐서, 왼쪽에 오디의 말(말풍선)과 근거, 오른쪽에 고를 수 있는 길을 의사결정 트리로 보여 줍니다. 통화 중·주행 중·탑승자가 고르는 중·픽업 완료는 접혀 있고, 줄을 누르면 펼치고 '접기'로 다시 접어요.
 - 통화 카드(`ui/audeo/CallPanel.kt`): 보이스톡처럼 어두운 카드에 참가자 얼굴을 나란히 두고, 말하는 사람에게 초록 고리가 생겨요. 참가자는 몇 명이든 그릴 수 있지만 서버 통화는 아직 1:1입니다.
-- 지도(`ui/audeo/LiveMap.kt`): 무료 스택. [MapLibre](https://maplibre.org) 지도 엔진 + [OpenFreeMap](https://openfreemap.org) 타일(키·요금 없음, 한국어 이름 표시) + [OSRM](https://project-osrm.org) 공개 경로 서버. 실제 길안내는 차의 내비(NaviHelper)가 합니다. 에뮬레이터 차 위치는 `adb emu geo fix <경도> <위도>`로 옮겨요.
+- 운전 중에는 진짜 내비가 주 화면(`ui/audeo/Overlay.kt`): NaviHelper는 내비 지도를 우리 앱 안에 그려 주지 않고, 차의 내비 앱을 조종(경로·경유지·취소·내비 화면 띄우기)하고 안내 정보(다음 회전, 남은 거리·시간)를 받기만 해요. 그래서 길안내가 시작되면 내비 화면을 앞으로 띄우고, Audeo가 뒤로 가면 오디가 내비 위 왼쪽 아래에 한 줄로 떠 있다가 고를 일이 있을 때만 펼쳐져요(전화가 와도 그 자리에 떠요). 할 일이 없으면 창을 떼서 내비를 가리지 않아요. 다른 앱 위에 표시 권한(`SYSTEM_ALERT_WINDOW`)이 필요하고, 에뮬레이터에서는 `adb shell appops set --user 10 com.audeo.app SYSTEM_ALERT_WINDOW allow`로 켭니다. 실제 차에서 이 권한을 줄 수 있는지는 Pleos 확인이 필요해요.
+- 앱 안 지도(`ui/audeo/LiveMap.kt`, 출발 전 만날 곳·도착 시각 확인용): 무료 스택. [MapLibre](https://maplibre.org) 지도 엔진 + [OpenFreeMap](https://openfreemap.org) 타일(키·요금 없음, 한국어 이름 표시) + [OSRM](https://project-osrm.org) 공개 경로 서버. 실제 길안내는 차의 내비(NaviHelper)가 합니다. 에뮬레이터 차 위치는 `adb emu geo fix <경도> <위도>`로 옮겨요.
 
 개발 도구(낮/밤, SDK 상태, 서버 다시 확인, 받아쓰기 시험)는 화면 오른쪽 위 모서리를 길게 누르면 열려요.
 
@@ -75,7 +76,8 @@ audeo.vehicle.plate=00가0000
 python3 tools/fake_passenger.py register --invite <초대 코드> --name 김민지 --short 민지 --phone 010-0000-0002
 python3 tools/fake_passenger.py run        # 걸려 온 전화를 동의하고 받기
 python3 tools/fake_passenger.py call 운전자  # 차량으로 전화 걸기(수신 화면 확인)
-python3 tools/fake_passenger.py late 10    # 진행 중 여정에 "10분 늦어"
+python3 tools/fake_passenger.py late 10    # 진행 중 여정에 "수하물이 늦게 나와서 10분 늦어"
+python3 tools/fake_passenger.py late 3 --reason "화장실 좀 다녀오느라"   # 늦는 까닭 바꾸기
 ```
 
 통화 음성(WebRTC)까지 시험하려면 탑승자 웹 페이지를 씁니다(탑승자 앱은 링크로 들어오는 웹 앱으로 만들 예정).
@@ -86,6 +88,13 @@ python3 tools/web_passenger/serve.py   # http://127.0.0.1:8787/?auto=1 (전화�
 
 - 내 목소리로 통화하기: `http://127.0.0.1:8787/?mic=1` (Chrome 마이크를 통화로 보내요. 이어폰을 끼세요)
 - 통화 음성 녹음: `&record=1`을 붙이면 통화가 끝날 때 `tools/web_passenger/recordings/`(또는 `AUDEO_REC_DIR`)에 webm으로 저장해요
+- 통화 대사 고르기: `&scenario=cold`(추운 날 공항, 기본) · `hot`(더운 날 에어컨) · `train`(KTX 서울역) · `restroom`(KTX, 가는 중에 다시 전화해 "화장실 좀 다녀오느라 3분 정도 늦을 것 같아")
+- 화면에는 네 가지만 있어요: 전화 수신과 AI 분석 동의, 통화 상태, 서버가 보낸 다이얼로그(제안·질문), 지도. 기록은 `&debug=1`일 때만 보여요
+- 늦는다는 말도 통화로 해요: 픽업이 진행 중이면 '운전자님에게 전화' 버튼이 생기고, 오디가 그 통화를 같이 듣고 계획을 바꿀지 차에 물어봐요. 자동 모드(`?auto=1`)에서는 내가 건 전화는 대사를 마치면 끊어요
+- 지도: 만날 곳·차·내 위치를 무료 지도(OpenFreeMap)에 보여 줘요
+- 나침반: 차가 300m 안으로 오면(`&near=` 로 바꿀 수 있어요) 지도 대신 iPhone '나의 찾기'처럼 화살표가 차 쪽을 가리키고 거리를 보여 줘요. 차를 향하면 파랗게 바뀌고, 15m 안(또는 GPS 오차 안)이면 '바로 근처'로 바뀝니다
+  - 내 위치는 이 기기의 정밀 위치(GPS), 방향은 기기 나침반을 써요. iPhone은 '나침반 켜기'를 한 번 눌러야 하고, 휴대폰에서 열려면 https 주소가 필요해요. 내 위치는 서버로 보내지 않아요
+  - 차 위치는 서버 `GET /journeys/{id}/car`(위치 공유 중인 계획·진행 중 픽업만, 끝나면 409)에서 5초마다 받아요. 에뮬레이터 차는 움직이지 않아서, 시험할 때는 페이지에서 `audeoTest.car(lat, lng)`로 다가오는 위치를 넣어요(넣은 뒤로는 서버 위치로 덮지 않음)
 
 에뮬레이터와 연결되려면 Chrome을 `--disable-features=WebRtcHideLocalIpsWithMdns`로 열어야 합니다(로컬 IP를 mDNS로 숨기면 에뮬레이터가 못 찾아요).
 

@@ -52,6 +52,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /**
  * 무료 지도: MapLibre(오픈소스 지도 엔진) + OpenFreeMap 타일(키·요금 없음) + OSRM 공개 경로 서버.
@@ -92,7 +93,9 @@ fun MapLayer(s: AudeoUiState, sheetPx: Int) {
     val journey = s.journey ?: s.finished
     val dest = journey?.meetPlace?.let { GeoPoint(it.latitude, it.longitude) }
     val car = s.car
-    val wantRoute = s.scene in ROUTE_SCENES && dest != null && car != null
+    // 통화 중에도 대화에서 정해진 만날 곳이 생기면 바로 지도에 길을 그려요(계획 승인 전 미리보기).
+    val showDest = s.scene in ROUTE_SCENES || s.scene == Scene.DONE || (s.scene == Scene.CALL && dest != null)
+    val wantRoute = (s.scene in ROUTE_SCENES || s.scene == Scene.CALL) && dest != null && car != null
     var route by remember { mutableStateOf<RouteLine?>(null) }
     // 목적지가 바뀌거나 차가 300m쯤 움직였을 때만 다시 받습니다.
     val routeKey = if (wantRoute) "${dest!!.lat},${dest.lng}|${(car!!.lat * 300).roundToInt()},${(car.lng * 300).roundToInt()}" else null
@@ -114,7 +117,9 @@ fun MapLayer(s: AudeoUiState, sheetPx: Int) {
     val bottomPx = sheetPx + with(density) { (ODI_RISE + 40.dp).roundToPx() }
     LiveMap(
         car = car,
-        dest = if (s.scene in ROUTE_SCENES || s.scene == Scene.DONE) dest else null,
+        passenger = s.passenger?.takeIf { System.currentTimeMillis() - it.atMillis < 10 * 60_000L }?.point,
+        passengerLabel = s.journey?.passengerCallName ?: s.call?.peerCallName,
+        dest = if (showDest) dest else null,
         destLabel = destLabel,
         route = route?.takeIf { wantRoute },
         night = Audeo.colors.isNight,
@@ -142,10 +147,13 @@ private const val SRC_ROUTE = "audeo-route"
 private const val SRC_CAR = "audeo-car"
 private const val SRC_DEST = "audeo-dest"
 private const val SRC_ENDS = "audeo-route-ends"
+private const val SRC_PAX = "audeo-passenger"
 
 @Composable
 private fun LiveMap(
     car: GeoPoint?,
+    passenger: GeoPoint?,
+    passengerLabel: String?,
     dest: GeoPoint?,
     destLabel: String?,
     route: RouteLine?,
@@ -159,6 +167,7 @@ private fun LiveMap(
     val brand = c.brand.toArgb()
     val ink = c.ink.toArgb()
     val halo = c.surface.toArgb()
+    val accent = c.caution.toArgb()
     val mapView = remember {
         MapLibre.getInstance(context)
         val options = MapLibreMapOptions.createFromAttributes(context)
@@ -198,11 +207,21 @@ private fun LiveMap(
         style = null
         m.setStyle(Style.Builder().fromUri(if (night) STYLE_NIGHT else STYLE_DAY)) { st ->
             koreanLabels(st)
-            addAudeoLayers(st, brand = brand, ink = ink, halo = halo)
+            addAudeoLayers(st, brand = brand, ink = ink, halo = halo, accent = accent)
             style = st
         }
     }
     // 데이터: 길·차·만날 곳
+    LaunchedEffect(style, passenger, passengerLabel) {
+        val st = style ?: return@LaunchedEffect
+        st.getSourceAs<GeoJsonSource>(SRC_PAX)?.setGeoJson(
+            passenger?.let {
+                val f = Feature.fromGeometry(Point.fromLngLat(it.lng, it.lat))
+                f.addStringProperty("label", passengerLabel.orEmpty())
+                FeatureCollection.fromFeature(f)
+            } ?: FeatureCollection.fromFeatures(emptyList()),
+        )
+    }
     LaunchedEffect(style, route, car, dest, destLabel) {
         val st = style ?: return@LaunchedEffect
         st.getSourceAs<GeoJsonSource>(SRC_ROUTE)?.setGeoJson(
@@ -231,9 +250,14 @@ private fun LiveMap(
     }
     // 카메라: 길이 있으면 길 전체가, 없으면 차(또는 만날 곳)가 시트 위 빈 곳 가운데 오도록
     val carKey = car?.let { "${(it.lat * 2000).roundToInt()},${(it.lng * 2000).roundToInt()}" }
-    LaunchedEffect(style, route, dest, carKey, topPx / 40, bottomPx / 40) {
+    // 탑승자 점은 약 300m 안에 들어왔을 때만 화면 맞추기에 넣어요(멀리 있으면 길 전체를 보는 게 나아요).
+    val paxNear = passenger != null && car != null && com.audeo.app.map.PlaceFinder.distanceM(car, passenger) < 400
+    val paxKey = if (paxNear) passenger?.let { "${(it.lat * 4000).roundToInt()},${(it.lng * 4000).roundToInt()}" } else null
+    LaunchedEffect(style, route, dest, carKey, paxKey, topPx / 40, bottomPx / 40) {
         val m = map ?: return@LaunchedEffect
         if (style == null) return@LaunchedEffect
+        // 시트가 접히고 펼쳐지는 동안 여백이 계속 바뀌므로, 멈춘 뒤에 한 번만 옮깁니다.
+        delay(Motion.ENTER_MS + 80L)
         val side = (96 / MAP_SCALE).roundToInt()
         val top = ((topPx + 60) / MAP_SCALE).roundToInt()
         val bottom = (bottomPx / MAP_SCALE).roundToInt()
@@ -241,6 +265,7 @@ private fun LiveMap(
             route?.points?.let { addAll(it) }
             car?.let { add(it) }
             dest?.let { add(it) }
+            if (paxNear) passenger?.let { add(it) }
         }
         val update = when {
             pts.size >= 2 && spread(pts) -> {
@@ -281,7 +306,8 @@ private fun koreanLabels(st: Style) {
     }
 }
 
-private fun addAudeoLayers(st: Style, brand: Int, ink: Int, halo: Int) {
+private fun addAudeoLayers(st: Style, brand: Int, ink: Int, halo: Int, accent: Int) {
+    st.addSource(GeoJsonSource(SRC_PAX))
     st.addSource(GeoJsonSource(SRC_ROUTE))
     st.addSource(GeoJsonSource(SRC_CAR))
     st.addSource(GeoJsonSource(SRC_DEST))
@@ -353,6 +379,36 @@ private fun addAudeoLayers(st: Style, brand: Int, ink: Int, halo: Int) {
             PropertyFactory.circleColor(brand),
             PropertyFactory.circleStrokeColor(halo),
             PropertyFactory.circleStrokeWidth(4f),
+        ),
+    )
+    // 탑승자(통화 중 휴대폰이 보낸 정밀 위치)
+    st.addLayer(
+        CircleLayer("audeo-pax-halo", SRC_PAX).withProperties(
+            PropertyFactory.circleRadius(20f),
+            PropertyFactory.circleColor(accent),
+            PropertyFactory.circleOpacity(0.22f),
+        ),
+    )
+    st.addLayer(
+        CircleLayer("audeo-pax", SRC_PAX).withProperties(
+            PropertyFactory.circleRadius(9f),
+            PropertyFactory.circleColor(accent),
+            PropertyFactory.circleStrokeColor(halo),
+            PropertyFactory.circleStrokeWidth(4f),
+        ),
+    )
+    st.addLayer(
+        SymbolLayer("audeo-pax-label", SRC_PAX).withProperties(
+            PropertyFactory.textField(Expression.get("label")),
+            PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
+            PropertyFactory.textSize(16f),
+            PropertyFactory.textColor(ink),
+            PropertyFactory.textHaloColor(halo),
+            PropertyFactory.textHaloWidth(3f),
+            PropertyFactory.textAnchor(Property.TEXT_ANCHOR_BOTTOM),
+            PropertyFactory.textOffset(arrayOf(0f, -1.3f)),
+            PropertyFactory.textAllowOverlap(true),
+            PropertyFactory.textIgnorePlacement(true),
         ),
     )
 }

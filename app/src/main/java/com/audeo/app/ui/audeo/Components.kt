@@ -150,7 +150,8 @@ fun SourceTag(kind: SourceKind, label: String? = null) {
         m = m.dashedBorder(c.inkMuted, Radius.sm)
     }
     Box(m.padding(horizontal = Space.s2), contentAlignment = Alignment.Center) {
-        Text(label ?: kind.label, style = AudeoType.label, color = fg, maxLines = 1)
+        // 시연 데이터는 서버가 다른 이름(label)을 붙여도 늘 '시연 데이터'로 보여요(조회 값처럼 보이지 않게).
+        Text(if (kind == SourceKind.DEMO) kind.label else label ?: kind.label, style = AudeoType.label, color = fg, maxLines = 1)
     }
 }
 

@@ -10,6 +10,7 @@
   python3 tools/web_passenger/serve.py            # http://127.0.0.1:8787/?auto=1
   내 목소리로: http://127.0.0.1:8787/?mic=1 (이어폰 권장), 통화 녹음: &record=1
   상황 고르기: &scenario=cold(기본, 추운 날 공항) | hot(더운 날 에어컨) | train(KTX 서울역)
+             | restroom(KTX, 가는 중에 탑승자가 다시 전화해 화장실 때문에 3분 늦는다고 말함)
 토큰은 tools/fake_passenger.py register 로 만든 tools/.fake_passenger.json 을 씁니다.
 """
 import json
@@ -60,7 +61,23 @@ SCENARIOS = {
         "오늘 좀 덥대. 차 안 시원하게 해 줘.",
     ],
 }
-LINES = SCENARIOS["cold"]
+SCENARIOS["restroom"] = SCENARIOS["train"]
+
+# 시연 영상(티저) 장면의 대사 그대로. 목소리는 macOS say가 아니라 글레오(Pleos) TTS로 미리 만들어 둔
+# audio/film/<이름>/lineN.wav 를 씁니다(에뮬레이터에서 글레오 TTS로 말하게 하고 소리를 받아 저장).
+# 대사는 시연 도구가 영상 시각에 맞춰 audeoTest.say(n) 으로 하나씩 말하게 해요(?script=manual).
+FILM = {
+    # 엄마(탑승자): 아파트 정문 픽업
+    "film_gate": ["어 아들.", "어 나왔어.", "오늘 좀 춥네.", "근데 정문 어디?"],
+    # 지호(탑승자): KTX 타고 서울역으로
+    "film_ktx": ["기차가 무슨 편이더라?", "광명 지나고 있어!", "그 서울역!"],
+}
+# 가는 중에 탑승자가 운전자에게 다시 거는 전화의 대사(따로 알리는 화면 없이 통화로만 말해요).
+LATER_CALLS = {
+    "restroom": [
+        ["나 화장실 좀 다녀오느라 삼 분 정도 늦을 것 같아.", "조금만 기다려 줘. 금방 나갈게."],
+    ],
+}
 
 
 HOURS = ["열두", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟", "아홉", "열", "열한"]
@@ -89,6 +106,8 @@ def ensure_audio():
     for name in SCENARIOS:
         lines, stamp = timed_lines(name)
         make_audio(os.path.join(HERE, "audio", name, stamp), lines)
+        for n, later in enumerate(LATER_CALLS.get(name, []), 1):
+            make_audio(os.path.join(HERE, "audio", name, f"later{n}"), later)
 
 
 def make_audio(out, lines):
@@ -130,11 +149,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/config.json"):
             ws = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
             q = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
+            if q.get("scenario") in FILM:
+                name = q["scenario"]
+                texts = FILM[name]
+                calls = [{"texts": texts, "files": [f"audio/film/{name}/line{i}.wav" for i in range(1, len(texts) + 1)]}]
+                return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "calls": calls}, ensure_ascii=False))
             name = q.get("scenario", "cold") if q.get("scenario") in SCENARIOS else "cold"
+            # calls[0] = 운전자가 건 첫 통화의 대사, calls[1..] = 탑승자가 나중에 다시 건 통화의 대사
             lines, stamp = timed_lines(name)
-            make_audio(os.path.join(HERE, "audio", name, stamp), lines)
-            files = [f"audio/{name}/{stamp}/line{i}.wav" for i in range(1, len(lines) + 1)]
-            return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "lines": len(lines), "texts": lines, "files": files}, ensure_ascii=False))
+            calls = [(f"{name}/{stamp}", lines)] + [(f"{name}/later{n}", l) for n, l in enumerate(LATER_CALLS.get(name, []), 1)]
+            out = []
+            for folder, texts in calls:
+                make_audio(os.path.join(HERE, "audio", folder), texts)
+                out.append({"texts": texts, "files": [f"audio/{folder}/line{i}.wav" for i in range(1, len(texts) + 1)]})
+            return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "calls": out}, ensure_ascii=False))
         path = self.path.split("?", 1)[0]
         name = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(HERE, name))

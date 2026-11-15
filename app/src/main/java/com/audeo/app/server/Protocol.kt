@@ -38,6 +38,9 @@ sealed interface ServerEvent {
     /** Audeo가 운전자에게 말할 문장. priority: question이면 말한 뒤 답을 듣습니다. */
     data class Say(override val seq: Long, override val at: Instant?, val text: String, val priority: String?, val proposalId: String?) : ServerEvent
 
+    /** 시연 통화의 대본 한 줄(운전자에게만, 시연 통화에서만). 서버가 이미 받아쓰기로 넣었으니 다시 보내지 않아요. role: passenger, driver. */
+    data class CallTranscript(override val seq: Long, override val at: Instant?, val callId: String, val role: String?, val speaker: String?, val text: String) : ServerEvent
+
     /** 서버가 이번에 실제로 한 판단(화면의 '생각' 줄)과 통화 자막에서 강조할 말. */
     data class Thinking(override val seq: Long, override val at: Instant?, val steps: List<String>, val highlights: List<String>) : ServerEvent
 
@@ -54,6 +57,7 @@ object Protocol {
         note = o.str("note") ?: o.str("last_call_at")?.let { "최근 통화" } ?: "Audeo 사용자",
         userId = o.str("user_id"),
         callName = o.str("call_name") ?: o.str("name") ?: "",
+        demo = o.optBoolean("demo"),
     )
 
     fun call(o: JSONObject, myUserId: String?): CallInfo {
@@ -79,6 +83,8 @@ object Protocol {
             analysisOn = o.optBoolean("analysis_on"),
             peerConsent = peerConsent,
             journeyId = o.str("journey_id"),
+            peerUserId = peerId,
+            demo = o.optBoolean("demo") || peer?.optBoolean("demo") == true,
         )
     }
 
@@ -95,9 +101,11 @@ object Protocol {
             fields = fields + missing.filter { it !in known }.mapNotNull(::missingField),
             summary = o.str("summary"),
             passengerCallName = o.optJSONObject("passenger")?.str("call_name"),
+            passengerUserId = o.optJSONObject("passenger")?.str("user_id"),
             meetPlace = plan?.optJSONObject("meet_place")?.let(::place),
             meetAtLabel = plan?.str("meet_at_label"),
             waitPlace = plan?.optJSONObject("wait_place")?.let(::place),
+            missing = missing,
         )
     }
 
@@ -136,8 +144,9 @@ object Protocol {
     }
 
     private fun place(o: JSONObject): Place? {
-        if (!o.has("lat") || !o.has("lng")) return null
-        return Place(o.str("name") ?: o.str("address") ?: "목적지", o.getDouble("lat"), o.getDouble("lng"))
+        // 서버가 이름만 알고 좌표를 모르는 곳은 lat/lng가 null로 와요.
+        if (o.isNull("lat") || o.isNull("lng")) return null
+        return Place(o.str("name") ?: o.str("address") ?: "목적지", o.getDouble("lat"), o.getDouble("lng"), o.str("address"))
     }
 
     fun proposal(o: JSONObject): Proposal {
@@ -211,10 +220,13 @@ object Protocol {
             target == "navi" && (op == "requestRoute" || op == "addWaypoint") -> {
                 val d = cmd.optJSONObject("destination") ?: cmd.optJSONObject("waypoint")
                 val place = d?.let { Place(it.str("poi_name") ?: it.str("address") ?: "목적지", it.optDouble("lat"), it.optDouble("lng")) }
+                val located = place?.takeUnless { it.latitude.isNaN() || it.longitude.isNaN() }
                 when {
-                    place == null || place.latitude.isNaN() || place.longitude.isNaN() -> CarCommand.Unsupported(target, op)
-                    op == "addWaypoint" -> CarCommand.AddStop(place)
-                    else -> CarCommand.Route(place)
+                    // 대체 경로: 목적지를 새로 잡으면(requestRoute) 넣어 둔 경유지가 사라져서, 같은 경로를 재탐색해요.
+                    op == "requestRoute" && cmd.optBoolean("reroute") -> CarCommand.Reroute(located, cmd.str("route_option"))
+                    located == null -> CarCommand.Unsupported(target, op)
+                    op == "addWaypoint" -> CarCommand.AddStop(located)
+                    else -> CarCommand.Route(located)
                 }
             }
             target in VEHICLE_TARGETS && op.startsWith("set") ->
@@ -245,6 +257,9 @@ object Protocol {
                 "execution.requested" -> ServerEvent.ExecutionRequested(seq, at, execution(d))
                 "execution.result" -> ServerEvent.ExecutionReported(seq, at, execution(d))
                 "coordination.updated" -> ServerEvent.CoordinationUpdated(seq, at, o.str("journey_id"), coordination(d))
+                "call.transcript" -> ServerEvent.CallTranscript(
+                    seq, at, d.str("call_id").orEmpty(), d.str("role"), d.str("speaker"), d.str("text").orEmpty(),
+                )
                 "rtc.signal" -> ServerEvent.RtcSignal(
                     seq, at, d.str("call_id").orEmpty(), d.str("kind").orEmpty(), d.optJSONObject("payload") ?: JSONObject(), d.str("from"),
                 )

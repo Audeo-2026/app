@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.audeo.app.BuildConfig
 import com.audeo.app.call.CallAudio
 import com.audeo.app.call.CallTranscriber
+import com.audeo.app.map.PlaceFinder
 import com.audeo.app.pleos.LocationController
 import com.audeo.app.pleos.NaviController
 import com.audeo.app.pleos.NaviEvent
@@ -36,6 +37,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
 
 data class NaviState(
     val connected: Boolean = false,
@@ -80,6 +82,8 @@ data class AudeoUiState(
     val location: String? = null,
     /** 차 위치(지도 표시용). 위치 권한이 있을 때 몇 초마다 새로 읽어요. */
     val car: GeoPoint? = null,
+    /** 탑승자 위치(통화 중 휴대폰이 보낸 정밀 위치). 가까워지면 '탑승자 찾기'로 보여 줘요. */
+    val passenger: PeerLocation? = null,
     val log: List<String> = emptyList(),
     val showStatus: Boolean = false,
     val server: ServerState = ServerState(),
@@ -139,7 +143,18 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     private var execGroup: String? = null
 
     /** 응답을 기다리는 내비 요청. 대기 시간이 지나 unknown으로 보고한 뒤에도, 늦게 확인되면 성공으로 고쳐 보고합니다. */
-    private data class PendingNavi(val executionId: String, val stop: Boolean, val place: Place, val timedOut: Boolean = false)
+    private data class PendingNavi(
+        val executionId: String,
+        val stop: Boolean,
+        val place: Place,
+        val timedOut: Boolean = false,
+        val reroute: Boolean = false,
+        /** 재탐색 응답이 없어 다른 요청으로 다시 시도했으면 그 요청 이름. */
+        val via: String? = null,
+    )
+
+    /** 이 여정에서 내비에 넣은 경유지(앞쪽이 먼저 들를 곳). 대체 경로를 다시 요청할 때 잃지 않으려고 기억해요. */
+    private val naviStops = mutableListOf<Place>()
     private var pendingNavi: PendingNavi? = null
     private var naviTimeout: Job? = null
 
@@ -147,6 +162,24 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     /** TTS가 끝나면 운전자의 답을 한 번 듣습니다. */
     private var expectAnswer = false
+
+    // ---------- 시연 탑승자 ----------
+
+    /** 시연 탑승자(연락처 demo=true)의 사용자 id. 서버가 대신 받아 대본 대화를 진행해요. */
+    private val demoUserIds = HashSet<String>()
+    /** 시연 탑승자에게 건 통화. 상대 기기가 없으니 WebRTC·받아쓰기를 켜지 않고 서버 자막(call.transcript)을 띄워요. */
+    private var demoCallId: String? = null
+    private val demoJourneyIds = HashSet<String>()
+
+    private fun isDemoCall(c: CallInfo?): Boolean =
+        c != null && (c.demo || c.id == demoCallId || c.peerUserId in demoUserIds)
+
+    /**
+     * 시연 탑승자와의 여정. 이 여정에서는 앱이 스스로 하던 판단(지도에서 정차할 곳 찾아 만날 곳 바꾸기,
+     * 춥다는 말에 열선 바로 켜기)을 하지 않아요. 서버가 같은 일을 제안 → 승인 → 실행으로 보여 줘요.
+     */
+    private fun isDemoJourney(j: Journey?): Boolean =
+        j != null && (j.id in demoJourneyIds || j.passengerUserId in demoUserIds)
 
 
     // ---------- 서버 연결 ----------
@@ -245,7 +278,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     private suspend fun loadContacts() {
         try {
             val me = server.identity?.userId
-            val contacts = server.contacts().filter { it.userId != me }
+            // 시연 탑승자는 맨 앞에 둬요(첫 화면은 5명까지만 보여요).
+            val contacts = server.contacts().filter { it.userId != me }.sortedByDescending { it.demo }
+            contacts.filter { it.demo }.mapNotNullTo(demoUserIds) { it.userId }
             live.update { it.copy(contacts = contacts, contactsLoading = false) }
             greetOnce()
         } catch (e: CancellationException) {
@@ -344,6 +379,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
                 }
             }
             is ServerEvent.Thinking -> if (fresh(e, 30)) onThinking(e)
+            is ServerEvent.CallTranscript -> if (fresh(e, 60)) onDemoTranscript(e)
             is ServerEvent.Say -> if (fresh(e, 30)) say(e.text, question = e.priority == "question" && e.proposalId != null)
             is ServerEvent.RtcSignal -> when {
                 e.callId != live.value.call?.id -> log("다른 통화의 신호: ${e.kind}")
@@ -383,7 +419,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
     private fun fresh(e: ServerEvent, seconds: Long): Boolean =
         e.at?.let { Duration.between(it, Instant.now()).seconds <= seconds } ?: true
 
-    private fun onCall(call: CallInfo) {
+    private fun onCall(callIn: CallInfo) {
+        val call = if (isDemoCall(callIn)) callIn.copy(demo = true) else callIn
+        if (call.demo) call.journeyId?.let(demoJourneyIds::add)
         val prev = live.value.call
         if (prev != null && prev.id != call.id && call.status == CallStatus.ENDED) return
         when (call.status) {
@@ -404,13 +442,15 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
                 live.update { it.copy(call = call, voice = if (prev?.status != CallStatus.ACTIVE) null else it.voice) }
                 if (prev?.id != call.id || prev.status != CallStatus.ACTIVE) {
                     startCallTimer()
-                    startCallAudio(call)
+                    // 시연 통화는 상대 기기가 없어요. 음성(WebRTC)과 운전자 마이크 받아쓰기를 켜지 않고 서버 자막만 띄워요.
+                    if (call.demo) log("시연 통화: 음성 연결·받아쓰기 없이 서버 대본 자막을 보여 줘요") else startCallAudio(call)
                 }
-                updateTranscription(call)
+                if (call.demo) transcriber.stop() else updateTranscription(call)
             }
             CallStatus.ENDED -> {
                 stopCallTimer()
                 stopCallAudio()
+                live.value.journey?.let { j -> viewModelScope.launch { delay(PLACE_AFTER_CALL_MS); live.value.journey?.takeIf { it.id == j.id }?.let(::maybeFindPlace) } }
                 val missed = prev?.status == CallStatus.RINGING
                 live.update {
                     it.copy(
@@ -432,7 +472,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         publish()
     }
 
-    private fun onJourney(j: Journey) {
+    private fun onJourney(jIn: Journey) {
+        // 시나리오 모드: 직접 정한 만날 곳이 서버 값보다 먼저예요.
+        val j = demoMeet?.takeIf { DemoSettings.scripted && !jIn.ended }?.let { jIn.copy(meetPlace = it) } ?: jIn
         val cur = live.value.journey
         if (j.ended) {
             if (cur == null || cur.id == j.id) onJourneyEnded(j.id, j.status, j)
@@ -443,6 +485,9 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             proposals.clear()
         }
         live.update { it.copy(journey = j, finished = null) }
+        maybeFindPlace(j)
+        maybeWarmCabin(j)
+        maybeFindStopSpot(j)
         if (j.status in DRIVING_STATUSES) {
             startStatusReports(j.id)
             watchMeetPlace(j)
@@ -460,19 +505,40 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         if (cur == null && (live.value.finished?.id == journeyId || ended == null)) return
         stopStatusReports()
         proposals.clear()
+        foundPlaces.clear()
+        naviStops.clear()
+        demoMeet = null
+        lookedUp = null
+        warmedFor = null
+        stopSpotFor = null
+        finderAnnounced = null
+        if (status == "cancelled") expectAnswer = false
         live.update {
             it.copy(
                 journey = null,
                 coordination = null,
+                passenger = null,
+                // 취소되면 대기 중이던 질문 말풍선도 내려요(첫 화면에 남지 않게).
+                voice = if (status == "cancelled") null else it.voice,
                 finished = if (status == "completed") (ended ?: cur) else null,
                 result = if (status == "cancelled") ActionResult(ResultState.SUCCESS, "픽업을 취소했어요", "위치 공유를 끝냈어요") else it.result,
             )
         }
         publish()
+        // 첫 화면으로 돌아가니 연락처를 새로 받아요(최근 통화 순서·시연 탑승자가 바뀌었을 수 있어요).
+        viewModelScope.launch { loadContacts() }
     }
 
     private fun onProposal(p: Proposal) {
         if (!forDriver(p)) return
+        // 지도에서 만날 곳(정문·정차할 곳)을 이미 정했으면 '어디서/몇 번 출구에서 만날까요?'는 답이 된 질문이라 닫아요.
+        if (p.status == "pending" && p.kind == "ask" && p.fieldKey in setOf("place", "exit") && foundPlaces.isNotEmpty() && live.value.journey?.meetPlace != null) {
+            p.options.firstOrNull { it.id == "later" }?.let { later ->
+                log("이미 지도에서 정한 만날 곳이 있어 질문을 닫아요: ${p.title}")
+                viewModelScope.launch { runCatching { server.decide(p.id, later.id, viaVoice = false, baseVersion = null) }.onSuccess(::onProposal) }
+                return
+            }
+        }
         if (p.status == "pending") proposals[p.id] = p else proposals.remove(p.id)
         publish()
     }
@@ -501,7 +567,8 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             top?.kind == "ask" -> Scene.ASK
             call?.status == CallStatus.ACTIVE -> Scene.CALL
             top != null -> when (top.kind) {
-                "change" -> Scene.CHANGE
+                // 경유지(stop)·대체 경로(route)도 근거·바뀌는 값·선택지가 있는 변경 카드예요(문구는 종류별로 달라요).
+                "change", "stop", "route" -> Scene.CHANGE
                 "vehicle_action" -> Scene.VEHICLE
                 else -> Scene.PLAN
             }
@@ -516,10 +583,13 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     fun callContact(contact: Contact) {
         val userId = contact.userId ?: return
+        if (contact.demo) demoUserIds.add(userId)
         viewModelScope.launch {
             live.update { it.copy(busy = true, result = null) }
             try {
-                onCall(server.startCall(userId, analysis = true))
+                val call = server.startCall(userId, analysis = true)
+                if (contact.demo) demoCallId = call.id
+                onCall(call)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -567,7 +637,15 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     /** 제안의 선택지 하나를 고릅니다. 실행은 서버가 execution으로 다시 요청할 때 합니다. */
     fun choose(option: ProposalOption, viaVoice: Boolean = false) {
-        val p = live.value.proposal ?: return
+        choose(live.value.proposal ?: return, option, viaVoice)
+    }
+
+    /**
+     * 화면에서 누른 버튼은 그 버튼이 그려진 제안에 답합니다. 지금 맨 위 제안으로 답하면, 누르는 순간
+     * 새 제안이 들어왔을 때 엉뚱한 제안에 답이 가요(예: '아니요'가 막 들어온 변경 제안의 답이 됨).
+     */
+    fun choose(p: Proposal, option: ProposalOption, viaVoice: Boolean = false) {
+        if (p.options.none { it.id == option.id }) return
         // 만날 곳·경유지처럼 탑승자가 정할 일은 운전자가 대신 고르지 않습니다(서버도 403으로 막아요).
         if (!p.decidedByDriver) {
             log("${p.kind}: 탑승자가 결정할 제안이라 운전자 답은 보내지 않아요")
@@ -624,6 +702,23 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
+    /** 주행 중 '픽업 취소'. 도착 전에는 여정을 끝낼 방법이 없어서(탔어요는 도착 화면에만 있어요) 처음으로 돌아가는 길이에요. */
+    fun cancelJourney() {
+        val j = live.value.journey ?: return
+        expectAnswer = false
+        voice.stopAll()
+        viewModelScope.launch {
+            try {
+                server.cancel(j.id)
+                onJourneyEnded(j.id, "cancelled")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fail("픽업을 취소하지 못했어요", e)
+            }
+        }
+    }
+
     fun notYet() {
         expectAnswer = false
         say("알겠어요. 천천히 기다릴게요.", question = false)
@@ -655,6 +750,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         when (val c = x.command) {
             is CarCommand.Route -> runNavi(x, c.place, stop = false)
             is CarCommand.AddStop -> runNavi(x, c.place, stop = true)
+            is CarCommand.Reroute -> runNavi(x, c.place ?: live.value.journey?.meetPlace ?: Place("목적지", Double.NaN, Double.NaN), stop = false, rerouteOption = c.option ?: "")
             is CarCommand.VehicleOp -> {
                 showExec(x.id, ExecState.PENDING, c.label)
                 log("Vehicle ${c.op} ${c.args.optString("area")}")
@@ -672,40 +768,89 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
-    private fun runNavi(x: Execution, place: Place, stop: Boolean) {
-        val ok = if (stop) navi.addStop(place) else navi.routeTo(place)
-        log("NaviHelper.${if (stop) "addWaypoint" else "requestRoute"}: ${place.name}")
+    /** [rerouteOption]이 null이 아니면 대체 경로: 목적지·경유지는 그대로 두고 재탐색해요(빈 문자열이면 지금 옵션으로). */
+    private fun runNavi(x: Execution, place: Place, stop: Boolean, rerouteOption: String? = null) {
+        val reroute = rerouteOption != null
+        val ok = when {
+            stop -> navi.addStop(place)
+            reroute -> navi.reroute(rerouteOption?.ifBlank { null })
+            else -> navi.routeTo(place)
+        }
+        log(
+            when {
+                stop -> "NaviHelper.addWaypoint: ${place.name}"
+                reroute -> rerouteOption?.ifBlank { null }?.let { "NaviHelper.changeRouteOption: $it" } ?: "NaviHelper.requestReRoute"
+                else -> "NaviHelper.requestRoute: ${place.name}"
+            },
+        )
         if (!ok) {
             showExec(x.id, ExecState.FAILED, if (navi.connected) "내비게이션에 요청하지 못했어요" else "내비와 아직 연결되지 않았어요")
             report(x, "failed", if (navi.connected) "request rejected" else "navi not connected")
             return
         }
         showExec(x.id, ExecState.PENDING, "내비게이션 응답을 기다리는 중")
-        pendingNavi = PendingNavi(x.id, stop, place)
+        pendingNavi = PendingNavi(x.id, stop, place, reroute = reroute)
         naviTimeout?.cancel()
+        // 재탐색은 응답이 없으면 경유지를 넣은 경로 요청으로 한 번 더 시도하니 그만큼 더 기다려요.
+        val timeoutMs = if (reroute) NAVI_TIMEOUT_MS + REROUTE_FALLBACK_MS else NAVI_TIMEOUT_MS
         naviTimeout = viewModelScope.launch {
-            delay(NAVI_TIMEOUT_MS)
+            if (reroute) {
+                delay(REROUTE_FALLBACK_MS)
+                val p = pendingNavi
+                if (p?.executionId == x.id && !p.place.latitude.isNaN()) {
+                    val stops = naviStops.toList()
+                    log("재탐색 응답이 없어 경유지 ${stops.size}곳을 넣은 경로로 다시 요청해요(NaviHelper.requestRouteWithWaypoints)")
+                    pendingNavi = p.copy(via = "requestRouteWithWaypoints")
+                    if (!navi.routeWithStops(p.place, stops)) log("경로 다시 요청 실패")
+                }
+                delay(timeoutMs - REROUTE_FALLBACK_MS)
+            } else {
+                delay(timeoutMs)
+            }
             val p = pendingNavi
             if (p?.executionId == x.id) {
                 pendingNavi = p.copy(timedOut = true)
                 showExec(x.id, ExecState.UNKNOWN, "내비게이션 응답을 확인하지 못했어요")
-                report(x, "unknown", "no navi callback in ${NAVI_TIMEOUT_MS / 1000}s")
+                report(x, "unknown", "no navi callback in ${timeoutMs / 1000}s")
                 delay(NAVI_LATE_MS)
                 if (pendingNavi?.executionId == x.id) pendingNavi = null
             }
         }
     }
 
-    private fun naviConfirmed() {
+    /** [callback]은 확인에 쓴 SDK 콜백 이름(서버 실행 결과 detail에 남겨요). */
+    private fun naviConfirmed(callback: String) {
         val p = pendingNavi ?: return
         pendingNavi = null
         naviTimeout?.cancel()
         if (p.timedOut) log("내비 응답이 늦게 왔어요: 성공으로 다시 보고해요")
+        when {
+            p.stop -> naviStops.add(0, p.place) // addWaypoint(FIRST)는 맨 앞에 들어가요
+            !p.reroute -> naviStops.clear() // 새 목적지로 경로를 잡으면 경유지가 없어져요
+        }
         val n = live.value.navi
         val observed = JSONObject().putOpt("remain_s", n.remainSeconds).putOpt("remain_m", n.remainMeters)
-        showExec(p.executionId, ExecState.SUCCESS, if (p.stop) "${p.place.name}을 경유지로 넣었어요" else "${p.place.name}로 길안내를 시작했어요")
-        report(p.executionId, "succeeded", if (p.stop) "onWaypointChanged" else "onRouteStarted", observed)
+        showExec(
+            p.executionId,
+            ExecState.SUCCESS,
+            when {
+                p.stop -> "${p.place.name}을 경유지로 넣었어요"
+                p.reroute -> "빠른 길로 다시 찾았어요 · 경유지는 그대로예요"
+                else -> "${p.place.name}로 길안내를 시작했어요"
+            },
+        )
+        report(p.executionId, "succeeded", p.via?.let { "$it → $callback" } ?: callback, observed)
+        // 길안내가 시작되면 진짜 내비를 주 화면으로 둡니다. 오디는 내비 위에 떠서 필요할 때만 펼쳐요.
+        if (DemoSettings.keepAudeoInFront) log("시연 녹화: 내비를 앞으로 띄우지 않고 Audeo 지도를 둬요") else showNavi()
     }
+
+    /** 내비 화면으로 돌아가기(운전 중 주 화면). 오디는 그 위에 떠 있어요. */
+    fun showNavi() {
+        if (!navi.showScreen()) log("내비 화면을 띄우지 못했어요")
+    }
+
+    /** 다른 앱 위에 그리기 권한이 없어 내비 위에 오디를 띄우지 못할 때. */
+    fun onOverlayDenied() = log("다른 앱 위에 표시 권한이 없어 내비 위에 오디를 띄우지 못해요")
 
     private fun <T> finishVehicle(x: Execution, r: Result<T>, success: String, failure: String, unsupported: String) {
         if (execViews[x.id]?.state != ExecState.PENDING) return
@@ -931,7 +1076,354 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         override fun onLog(message: String) {
             viewModelScope.launch(Dispatchers.Main) { log(message) }
         }
+
+        override fun onPeerMessage(message: JSONObject) {
+            if (message.optString("t") != "loc" || !message.has("lat") || !message.has("lng")) return
+            val loc = PeerLocation(
+                message.optDouble("lat"),
+                message.optDouble("lng"),
+                message.optDouble("acc").takeUnless { it.isNaN() },
+                System.currentTimeMillis(),
+            )
+            viewModelScope.launch(Dispatchers.Main) { onPassengerLocation(loc) }
+        }
     })
+
+    // ---------- 탑승자 위치(통화 중 데이터 채널) ----------
+
+    private var paxLoggedAt = 0L
+
+    private fun onPassengerLocation(loc: PeerLocation) {
+        val first = live.value.passenger == null
+        live.update { it.copy(passenger = loc) }
+        val car = live.value.car
+        val d = car?.let { PlaceFinder.distanceM(it, loc.point) }
+        if (first || loc.atMillis - paxLoggedAt > PAX_LOG_MS) {
+            paxLoggedAt = loc.atMillis
+            log("탑승자 위치(데이터 채널): ${"%.5f, %.5f".format(loc.lat, loc.lng)}${d?.let { " · 차에서 ${it.roundToInt()}m" } ?: ""}")
+        }
+        live.value.journey?.let(::maybeFindPlace)
+        checkFinder()
+    }
+
+    // ---------- 시연 시나리오 단계(debug 시연 도구가 영상 시각에 맞춰 보냄) ----------
+
+    private fun onDemoStep(step: String, a: Map<String, String>) {
+        when (step) {
+            "think" -> think(a["steps"].orEmpty().split("|").filter { it.isNotBlank() })
+            "say" -> say(a["text"].orEmpty(), question = false)
+            "banner" -> live.update { it.copy(result = ActionResult(ResultState.SUCCESS, a["title"].orEmpty(), a["detail"])) }
+            "warm" -> { warmedFor = null; warmCabin(a["heard"] ?: "‘오늘 좀 춥네’", quiet = true) }
+            "finder" -> location.latest { d ->
+                onCarMoved(d.latitude, d.longitude)
+                val name = live.value.journey?.passengerCallName ?: live.value.call?.peerCallName ?: "탑승자"
+                live.value.passenger?.let { p ->
+                    val dist = live.value.car?.let { PlaceFinder.distanceM(it, p.point) }
+                    log("탑승자 찾기: $name ${dist?.roundToInt() ?: "-"}m (정밀 위치 · 데이터 채널)")
+                    callAudio.send(JSONObject().put("t", "note").put("text", a["note"] ?: "차가 ${dist?.let(::distanceText) ?: "가까이"} 앞에 있어요. 화살표를 따라오세요."))
+                }
+            }
+            "place", "stop" -> {
+                val name = a["name"] ?: return
+                val lat = a["lat"]?.toDoubleOrNull() ?: return
+                val lng = a["lng"]?.toDoubleOrNull() ?: return
+                val p = Place(name, lat, lng, a["address"] ?: name)
+                foundPlaces[name] = p
+                log("지도 검색 결과: $name ${"%.5f, %.5f".format(lat, lng)} (시나리오)")
+                demoSetPlace(p, a["meet"])
+            }
+            "transport" -> demoPatch("transport", a["value"].orEmpty())
+        }
+    }
+
+    private fun demoJourneyId(): String? = live.value.journey?.id ?: live.value.call?.journeyId
+
+    private fun demoPatch(key: String, value: String) {
+        val id = demoJourneyId() ?: return log("시나리오: 여정이 없어 $key 를 못 넣었어요")
+        viewModelScope.launch {
+            runCatching {
+                val cur = server.journey(id)
+                onJourney(server.patchField(id, key, value, cur.version))
+                log("시나리오: $key = $value")
+            }.onFailure { log("시나리오 $key 실패: ${it.message}") }
+        }
+    }
+
+    /** 만날 곳(+만남 시각)을 정해 서버가 계획을 만들게 해요. 두 화면에 같은 곳이 떠요. */
+    /** 시나리오에서 정한 만날 곳. 서버 응답이 늦거나 실패해도 두 화면에 바로 떠요. */
+    private var demoMeet: Place? = null
+
+    private fun demoSetPlace(p: Place, meet: String?) {
+        demoMeet = p
+        live.update { s -> s.copy(journey = s.journey?.copy(meetPlace = p)) }
+        publish()
+        callAudio.send(JSONObject().put("t", "meet").put("name", p.name).put("lat", p.latitude).put("lng", p.longitude))
+        val id = demoJourneyId() ?: return log("시나리오: 여정이 없어 만날 곳을 못 정했어요")
+        viewModelScope.launch {
+            runCatching {
+                server.putSavedPlaces(bookmarks = emptyList(), recent = foundPlaces.values.toList())
+                var j = server.journey(id)
+                j = server.patchField(id, "place", p.name, j.version)
+                log("만날 곳을 지도에서 찾은 곳으로 정했어요: ${p.name}")
+                // meet="skip": 만남 시각은 비워 둬서 서버가 '몇 시쯤 나오세요?'를 묻게 해요(질문 화면 시안용).
+                val at = if (meet == "skip") null else meet ?: if ("meet_time" in j.missing) LocalTime.now().plusMinutes(3).format(DateTimeFormatter.ofPattern("HH:mm")) else null
+                if (at != null) j = server.patchField(id, "meet_time", at, j.version)
+                onJourney(j)
+                server.planNow(id)
+                refreshProposals(id)
+            }.onFailure { log("시나리오 만날 곳 실패: ${it.message}") }
+        }
+    }
+
+    // ---------- 탑승자 찾기(가까워지면) ----------
+
+    private var finderAnnounced: String? = null
+
+    /** 탑승자와 300m 안이 되면 한 번 알려요(화면의 '탑승자 찾기'는 UI가 거리로 그려요). */
+    private fun checkFinder() {
+        if (DemoSettings.scripted) return
+        val s = live.value
+        val pax = s.passenger ?: return
+        val car = s.car ?: return
+        if (System.currentTimeMillis() - pax.atMillis > 3 * 60_000L) return
+        val key = s.journey?.id ?: s.call?.id ?: return
+        val d = PlaceFinder.distanceM(car, pax.point)
+        if (d > FINDER_M || finderAnnounced == key) return
+        finderAnnounced = key
+        val name = s.journey?.passengerCallName ?: s.call?.peerCallName ?: "탑승자"
+        val where = s.journey?.meetPlace?.name
+        log("탑승자 찾기: $name ${d.roundToInt()}m (정밀 위치 · 데이터 채널)")
+        think(listOfNotNull("$name 정밀 위치 · 차에서 ${distanceText(d)}", where?.let { "$it 근처에서 서로 찾는 중" }, "차와 휴대폰에 ‘찾기’ 화면을 띄워요"))
+        callAudio.send(JSONObject().put("t", "note").put("text", "차가 ${distanceText(d)} 앞에 있어요. 화살표를 따라오세요."))
+    }
+
+    // ---------- 탑승자가 춥다고 하면 자리 데우기 ----------
+
+    private var warmedFor: String? = null
+
+    /**
+     * 서버가 대화에서 '차 안 따뜻하게' 같은 선호를 알아들으면(통화 중에도 와요) 탑승자 자리(조수석) 열선을 켭니다.
+     * 서버는 통화 중에는 선호만 기록하고 차량 준비 제안은 도착 무렵에야 보내서, 짧은 픽업에서는 늦어요.
+     * 되돌리기 쉬운 편의 기능이라 바로 켜고 결과를 화면·음성으로 알려 줘요(끄려면 차 버튼으로).
+     */
+    private fun maybeWarmCabin(j: Journey) {
+        if (DemoSettings.scripted || isDemoJourney(j)) return
+        val pref = j.fields.firstOrNull { it.key == "preference" }?.value ?: return
+        if (!WARM_WORDS.any { pref.contains(it) } || j.ended) return
+        warmCabin("‘$pref’")
+    }
+
+    /**
+     * 통화 받아쓰기에서 탑승자가 '춥네·추워'라고 하면 서버 분석(5초쯤 걸려요)을 기다리지 않고 바로 데워요.
+     * 서버가 같은 선호를 알아들으면 생각 줄로 다시 확인돼요. 한 픽업(통화)에 한 번만.
+     */
+    private fun warmCabin(heard: String, quiet: Boolean = false) {
+        val j = live.value.journey
+        val key = j?.id ?: live.value.call?.id ?: return
+        if (warmedFor == key || (j != null && warmedFor == live.value.call?.id)) return
+        warmedFor = key
+        val name = j?.passengerCallName ?: live.value.call?.peerCallName ?: "탑승자"
+        val eta = j?.let(::etaMinutes)
+        log("Vehicle setHvacSeatTemperature ROW_1_RIGHT 2단 · 들은 말: $heard")
+        showExec("warm-$key", ExecState.PENDING, "조수석 열선 2단")
+        viewModelScope.launch {
+            val r = vehicle.execute("setHvacSeatTemperature", JSONObject().put("area", "ROW_1_RIGHT").put("level", 2))
+            withContext(Dispatchers.Main) {
+                val ok = r.isSuccess
+                showExec("warm-$key", if (ok) ExecState.SUCCESS else ExecState.FAILED, if (ok) "${name} 자리(조수석) 열선을 켰어요" else "조수석 열선을 켜지 못했어요")
+                log(if (ok) "Vehicle 확인: 조수석 열선 ${r.getOrNull()}단" else "Vehicle 실패: ${r.exceptionOrNull()?.message}")
+                if (!quiet) think(listOfNotNull("$heard · ${name}이 춥대요", eta?.let { "${it}분 후 도착 · ${name} 자리는 조수석" }, if (ok) "조수석 열선 2단 켜기 · Pleos Vehicle" else "조수석 열선을 켜지 못했어요"))
+                if (ok) {
+                    if (!quiet) say("${eta?.let { "${it}분 후 도착해요. " } ?: ""}조수석 열선을 켜 둘게요.", question = false)
+                    callAudio.send(JSONObject().put("t", "note").put("text", "자리를 따뜻하게 데워 두고 있어요(조수석 열선)."))
+                }
+            }
+        }
+    }
+
+    /** 만날 곳까지 남은 분. 내비 값이 있으면 그걸, 없으면 직선거리를 시내 속도(20km/h)로 어림해요. */
+    private fun etaMinutes(j: Journey): Int? {
+        live.value.navi.remainSeconds?.takeIf { it > 0 }?.let { return ((it + 59) / 60) }
+        val car = live.value.car ?: return null
+        val dest = j.meetPlace?.let { GeoPoint(it.latitude, it.longitude) } ?: foundPlaces.values.lastOrNull()?.let { GeoPoint(it.latitude, it.longitude) } ?: return null
+        val m = PlaceFinder.distanceM(car, dest) * 1.3
+        return maxOf(1, kotlin.math.ceil(m / (20_000.0 / 60)).toInt())
+    }
+
+    // ---------- 기차역 픽업: 도착 시각에 맞춰 잠깐 세울 곳 ----------
+
+    private var stopSpotFor: String? = null
+
+    /**
+     * 서버가 열차와 도착 시각을 알아내고 만날 곳이 역이면, 역 근처에서 잠깐 정차할 곳(택시 하차장·승하차장)을
+     * 지도에서 찾아 만날 곳으로 정합니다. 차가 열차보다 먼저 닿으면 오래 서 있을 수 없는 곳이라 하차장을 골라요.
+     */
+    private fun maybeFindStopSpot(j: Journey) {
+        // 시연 여정은 서버가 승하차장 변경을 제안으로 물어봐요. 앱이 먼저 만날 곳을 바꾸면 그 제안이 어긋나요.
+        if (DemoSettings.scripted || isDemoJourney(j)) return
+        val ride = j.fields.firstOrNull { it.key == "transport" && it.code != null } ?: return
+        val station = j.meetPlace ?: return
+        if (!station.name.contains("역") || station.name.contains("하차") || j.ended) return
+        if (stopSpotFor == j.id) return
+        stopSpotFor = j.id
+        val name = j.passengerCallName ?: "탑승자"
+        val arrive = ride.value?.substringAfter("·", "")?.trim()?.takeIf { it.isNotEmpty() }
+        viewModelScope.launch {
+            log("지도 검색(OpenStreetMap): ${station.name} 근처 정차할 곳")
+            val spot = withContext(Dispatchers.IO) { placeFinder.findStopSpot(GeoPoint(station.latitude, station.longitude)) }
+            val eta = etaMinutes(j)
+            if (spot == null) {
+                think(listOfNotNull("${ride.value}", "${station.name} 근처 정차할 곳 찾기 · OpenStreetMap", "찾지 못했어요 · ${station.name}으로 갈게요"))
+                return@launch
+            }
+            val label = "${station.name} ${spot.label}"
+            log("지도 검색 결과: $label ${"%.5f, %.5f".format(spot.lat, spot.lng)} · 역에서 ${spot.distanceM?.roundToInt()}m")
+            think(
+                listOfNotNull(
+                    "${ride.code?.let { prettyTrain(it) } ?: ride.value} · ${arrive ?: ""}".trim(' ', '·'),
+                    eta?.let { "차는 ${it}분 후 도착 · 오래 서 있을 수 없어요" },
+                    "도착 시각에 맞춰 정차할 곳 찾기 · OpenStreetMap",
+                    "$label · 여기 잠깐 세우면 돼요",
+                ),
+            )
+            val place = Place(label, spot.lat, spot.lng, spot.label)
+            foundPlaces[label] = place
+            say("${prettyTrain(ride.code ?: "")}${arrive?.let { ", $it" } ?: ""}. ${label}에 세우면 돼요.", question = false)
+            callAudio.send(JSONObject().put("t", "note").put("text", "${label}에서 기다릴게요."))
+            try {
+                server.putSavedPlaces(bookmarks = emptyList(), recent = foundPlaces.values.toList())
+                val cur = server.journey(j.id)
+                onJourney(server.patchField(j.id, "place", label, cur.version))
+                server.planNow(j.id)
+                log("만날 곳을 정차할 곳으로 정했어요: $label")
+                refreshProposals(j.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("정차할 곳을 정하지 못했어요: ${e.message}")
+            }
+        }
+    }
+
+    /** "KTX356" → "KTX 356" */
+    private fun prettyTrain(code: String) = code.replace(Regex("^([A-Za-z가-힣-]+)(\\d+)$"), "$1 $2")
+
+    // ---------- 대화에 나온 장소를 지도에서 찾기 ----------
+
+    private val placeFinder = PlaceFinder()
+    /** 지도에서 찾은 곳(들은 이름 → 좌표). 서버에 저장 장소로 올려서 서버가 이름으로 좌표를 붙이게 해요. */
+    private val foundPlaces = LinkedHashMap<String, Place>()
+    private var placeLookup: Job? = null
+    private var lookedUp: String? = null
+    private var confirming = false
+
+    /**
+     * 서버가 대화에서 장소 이름은 들었는데 좌표를 모를 때(처음 듣는 곳) 지도에서 찾아 봅니다.
+     * 탑승자 위치가 있으면 그 근처를, 없으면 차 근처를 먼저 찾아요. 찾으면 서버에 저장 장소로 알려 주고,
+     * 통화가 끝났는데도 좌표가 없으면 운전자 쪽 '수정'처럼 장소를 다시 정해 계획을 만들게 합니다.
+     */
+    private fun maybeFindPlace(j: Journey) {
+        if (DemoSettings.scripted || isDemoJourney(j)) return
+        val name = j.heardPlace ?: return
+        if (j.ended || !j.placeUnlocated) return
+        (foundPlaces[name] ?: foundPlaces.values.firstOrNull { it.name == name })?.let {
+            confirmPlace(j.id, it.name)
+            return
+        }
+        // 서버가 아직 모를 때 넣는 자리표시('대화 중 (장소 미확인)', '미정')는 찾지 않아요.
+        if (PLACEHOLDER.containsMatchIn(name)) return
+        val key = "${j.id}|$name"
+        if (lookedUp == key) return
+        // 더 새 장소 이름이 들어오면 하던 검색은 그만두고 새로 찾아요.
+        placeLookup?.cancel()
+        val pax = live.value.passenger?.takeIf { System.currentTimeMillis() - it.atMillis < PAX_FRESH_MS }
+        val center = pax?.point ?: live.value.car
+        // 탑승자 위치가 곧 올 수 있으니(통화가 막 이어진 참) 잠깐 기다렸다가 찾습니다.
+        if (pax == null && live.value.call?.status == CallStatus.ACTIVE && live.value.callSeconds < PAX_WAIT_S) return
+        lookedUp = key
+        val nearWho = when {
+            pax != null -> "${j.passengerCallName ?: "탑승자"} 위치"
+            center != null -> "차 위치"
+            else -> null
+        }
+        placeLookup = viewModelScope.launch {
+            log("지도 검색(OpenStreetMap): ‘$name’${nearWho?.let { " · $it 근처" } ?: ""}")
+            val hit = withContext(Dispatchers.IO) { placeFinder.find(name, center) }
+            if (hit == null) {
+                log("지도에서 ‘$name’을 찾지 못했어요")
+                think(listOf("지도에서 ‘$name’ 찾기 · OpenStreetMap", "찾지 못했어요 · 운전자에게 물어볼게요"))
+                return@launch
+            }
+            // 서버가 들은 이름('정문')보다 지도 이름('은마아파트 정문')이 알아보기 쉬워서 그 이름으로 정해요.
+            val place = Place(hit.label, hit.lat, hit.lng, hit.label)
+            foundPlaces[name] = place
+            log("지도 검색 결과: ${hit.label} ${"%.5f, %.5f".format(hit.lat, hit.lng)}${hit.distanceM?.let { " · ${it.roundToInt()}m" } ?: ""}")
+            think(
+                listOfNotNull(
+                    "지도에서 ‘$name’ 찾기 · OpenStreetMap",
+                    if (hit.distanceM != null && nearWho != null) "$nearWho 근처 ${distanceText(hit.distanceM)} · ${hit.label}" else hit.label,
+                    "만날 곳 좌표 확인 · 내비에 넣을 수 있어요",
+                ),
+            )
+            try {
+                server.putSavedPlaces(bookmarks = emptyList(), recent = foundPlaces.values.toList())
+                log("찾은 장소를 서버 저장 장소로 올렸어요: $name")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("저장 장소 올리기 실패: ${e.message}")
+                return@launch
+            }
+            // 통화 중이어도 바로 정해요. 그래야 차 지도와 탑승자 휴대폰에 만날 곳이 곧바로 떠요(계획 승인은 운전자가 해요).
+            confirmPlace(j.id, place.name)
+        }
+    }
+
+    private fun confirmPlace(journeyId: String, name: String) {
+        if (confirming) return
+        confirming = true
+        viewModelScope.launch {
+            try {
+                val cur = server.journey(journeyId)
+                if (!cur.placeUnlocated) return@launch
+                var j2 = server.patchField(journeyId, "place", name, cur.version)
+                log("만날 곳을 지도에서 찾은 곳으로 정했어요: $name")
+                // 서버는 만남 시각까지 있어야 계획(지도에 띄울 만날 곳)을 만들어요. 대화에 시각이 없으면
+                // 지금 데리러 가는 길이니 차가 도착하는 시각으로 정해요(운전자 쪽 수정과 같아요).
+                if ("meet_time" in j2.missing) {
+                    val eta = etaMinutes(j2) ?: foundPlaces.values.lastOrNull()?.let { p ->
+                        live.value.car?.let { c -> maxOf(1, kotlin.math.ceil(PlaceFinder.distanceM(c, GeoPoint(p.latitude, p.longitude)) * 1.3 / 333.0).toInt()) }
+                    } ?: 5
+                    val at = LocalTime.now().plusMinutes(eta.toLong()).format(DateTimeFormatter.ofPattern("HH:mm"))
+                    j2 = server.patchField(journeyId, "meet_time", at, j2.version)
+                    log("만남 시각을 차 도착 시각으로 정했어요: $at (${eta}분 뒤)")
+                }
+                onJourney(j2)
+                server.planNow(journeyId)
+                // 장소를 정했으니 '어디서 만날까요?' 질문은 닫아요.
+                proposals.values.filter { it.kind == "ask" && it.fieldKey == "place" }.toList().forEach { p ->
+                    val later = p.options.firstOrNull { it.id == "later" } ?: return@forEach
+                    runCatching { server.decide(p.id, later.id, viaVoice = false, baseVersion = null) }.onSuccess(::onProposal)
+                }
+                refreshProposals(journeyId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("만날 곳을 정하지 못했어요: ${e.message}")
+            } finally {
+                confirming = false
+            }
+        }
+    }
+
+    private fun distanceText(m: Double) = if (m < 1000) "${(m / 10).roundToInt() * 10}m" else "%.1fkm".format(m / 1000)
+
+    private var localThinkingId = -1L
+
+    /** 앱이 직접 한 판단(지도 검색 등)도 서버 생각 줄과 같은 자리에 차례로 보여 줘요. */
+    private fun think(steps: List<String>) {
+        onThinking(ServerEvent.Thinking(localThinkingId--, null, steps, emptyList()))
+    }
 
     private val transcriber = CallTranscriber(
         voice,
@@ -976,12 +1468,40 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         }
     }
 
+    private var demoTalkJob: Job? = null
+
+    /**
+     * 시연 통화의 대본 한 줄을 통화 카드 자막으로 띄워요(받아쓰기 결과와 같은 모양). 서버가 이미 대화로 넣었으니
+     * utterances로 다시 보내지 않고, 춥다는 말에 열선을 바로 켜지도 않아요(서버가 제안으로 물어봐요).
+     */
+    private fun onDemoTranscript(e: ServerEvent.CallTranscript) {
+        val call = live.value.call
+        if (call == null || call.id != e.callId || e.text.isBlank()) return log("시연 자막(다른 통화): ${e.text}")
+        val passenger = e.role != "driver"
+        val who = if (passenger) "${call.peerCallName}이 말하는 중" else "내가 말하는 중"
+        live.update { it.copy(voice = VoiceUi(VoiceMode.LISTENING, who = who, caption = "“${e.text}”")) }
+        log("시연 자막(${e.role ?: "-"}): ${e.text}")
+        // 통화 카드에서 말하는 사람 고리를 잠깐 켜요(음성이 없으니 자막이 올 때 기준).
+        talkingNow.value = setOf(if (passenger) "peer" else "me")
+        demoTalkJob?.cancel()
+        demoTalkJob = viewModelScope.launch {
+            delay(DEMO_TALK_MS)
+            talkingNow.value = emptySet()
+        }
+    }
+
     private fun onTranscribed(channel: String, text: String) {
         val call = live.value.call ?: return
-        if (!call.analysisOn) return
+        if (!call.analysisOn || call.demo) return
         val who = if (channel == "rx") "${call.peerCallName}이 말하는 중" else "내가 말하는 중"
         live.update { it.copy(voice = VoiceUi(VoiceMode.LISTENING, who = who, caption = "“$text”")) }
         log("받아씀($channel): $text")
+        if (!DemoSettings.scripted && channel == "rx" && COLD_WORDS.any { text.contains(it) }) {
+            // 받아쓰기가 앞말과 붙어 올 수 있어요("어 나왔어 오늘 좀 춥네"). 추위 말이 든 끝 세 낱말만 보여 줘요.
+            val words = text.trim().trimEnd('.', '!', '?').split(Regex("\\s+"))
+            val i = words.indexOfLast { w -> COLD_WORDS.any { w.contains(it) } }.coerceAtLeast(0)
+            warmCabin("‘${words.subList(maxOf(0, i - 2), i + 1).joinToString(" ")}’")
+        }
         val seq = ++utteranceSeq
         viewModelScope.launch {
             runCatching { server.utterances(call.id, listOf(Utterance(seq, channel, text))) }
@@ -998,6 +1518,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             while (isActive) {
                 delay(1000)
                 live.update { it.copy(callSeconds = it.callSeconds + 1) }
+                if (live.value.callSeconds == PAX_WAIT_S) live.value.journey?.let(::maybeFindPlace)
             }
         }
     }
@@ -1049,6 +1570,8 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             while (isActive) {
                 delay(CAR_POLL_MS)
                 location.latest { d -> onCarMoved(d.latitude, d.longitude) }
+                // 차가 서 있어도 통화 중에는 차 위치를 탑승자 휴대폰에 계속 보내요(탑승자 나침반).
+                lastLocation?.let { (la, ln) -> if (callAudio.active) callAudio.send(JSONObject().put("t", "loc").put("lat", la).put("lng", ln).put("at", System.currentTimeMillis())) }
             }
         }
     }
@@ -1057,6 +1580,8 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     private fun onCarMoved(lat: Double, lng: Double) {
         lastLocation = lat to lng
+        if (callAudio.active) callAudio.send(JSONObject().put("t", "loc").put("lat", lat).put("lng", lng).put("at", System.currentTimeMillis()))
+        checkFinder()
         val p = GeoPoint(lat, lng)
         if (live.value.car == p) return
         live.update { it.copy(car = p, location = "%.5f, %.5f".format(lat, lng)) }
@@ -1074,15 +1599,28 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
             is NaviEvent.RouteStarted -> {
                 live.update { it.copy(navi = it.navi.copy(remainSeconds = event.seconds, remainMeters = event.meters)) }
                 log("onRouteStarted: ${event.name ?: "-"}, ${event.seconds / 60}분, ${event.meters}m")
-                if (pendingNavi?.stop == false) naviConfirmed()
+                if (pendingNavi?.stop == false) naviConfirmed("onRouteStarted")
             }
             NaviEvent.RoutingCompleted -> {
                 log("onRoutingCompleted")
-                if (pendingNavi?.stop == false) naviConfirmed()
+                if (pendingNavi?.stop == false) naviConfirmed("onRoutingCompleted")
             }
             NaviEvent.WaypointChanged -> {
                 log("onWaypointChanged")
-                if (pendingNavi?.stop == true) naviConfirmed()
+                if (pendingNavi?.stop == true) naviConfirmed("onWaypointChanged")
+            }
+            NaviEvent.ReRouteEnded -> {
+                log("onReRouteEnded")
+                if (pendingNavi?.reroute == true) naviConfirmed("onReRouteEnded")
+            }
+            is NaviEvent.RouteOptionChanged -> {
+                log("onRouteOptionChanged: ${event.option}")
+                if (pendingNavi?.reroute == true) naviConfirmed("onRouteOptionChanged")
+            }
+            is NaviEvent.WaypointArrived -> {
+                log("onWayPointArrived: ${event.name ?: "-"}")
+                // 지난 경유지는 빼요(대체 경로를 다시 요청할 때 다시 넣지 않게).
+                (naviStops.firstOrNull { it.name == event.name } ?: naviStops.firstOrNull())?.let(naviStops::remove)
             }
             is NaviEvent.Driving -> live.update {
                 it.copy(navi = it.navi.copy(remainSeconds = event.seconds ?: it.navi.remainSeconds, remainMeters = event.meters ?: it.navi.remainMeters))
@@ -1110,6 +1648,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     private fun say(text: String, question: Boolean) {
         if (text.isBlank()) return
+        log("TTS 말하기: $text")
         val v = VoiceUi(VoiceMode.SPEAKING, caption = "“$text”", hint = if (question) "말씀하시면 바로 멈춰요" else null)
         live.update { it.copy(voice = v) }
         // TTS 끝 알림이 안 오는 경우(다른 앱 소리에 밀림 등)를 대비해 말할 시간이 지나면 표시를 내립니다.
@@ -1210,6 +1749,7 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
 
     // 초기화는 맨 끝에 둡니다. 위의 프로퍼티(통화 음성, 받아쓰기 등)가 모두 만들어진 뒤에 실행돼야 해요.
     init {
+        DemoSettings.onStep = { step, args -> onDemoStep(step, args) }
         navi.connect { event -> viewModelScope.launch(Dispatchers.Main) { onNaviEvent(event) } }
         val vehicleError = vehicle.start()
         log(if (vehicleError == null) "Vehicle 준비됨" else "Vehicle 초기화 실패: $vehicleError")
@@ -1238,15 +1778,33 @@ class AudeoViewModel(app: Application) : AndroidViewModel(app), VoiceController.
         const val THINKING_BASE_MS = 1_400L
         const val THINKING_STEP_MS = 700L
         const val CAR_POLL_MS = 3_000L
+        /** 탑승자와 이 거리(m) 안이면 '탑승자 찾기'. */
+        const val FINDER_M = 300.0
+        val WARM_WORDS = listOf("따뜻", "춥", "추워", "추운", "히터", "열선")
+        /** 탑승자 말에서 바로 알아듣는 추위 표현(받아쓰기 그대로). */
+        val PLACEHOLDER = Regex("미확인|미정|모름|알 수 없|^대화 중")
+        val COLD_WORDS = listOf("춥네", "추워", "춥다", "춥대", "너무 춥")
+        /** 탑승자 위치를 로그에 남기는 간격(기능 표시용). */
+        const val PAX_LOG_MS = 20_000L
+        /** 이보다 오래된 탑승자 위치는 장소 찾기 기준으로 쓰지 않아요. */
+        const val PAX_FRESH_MS = 10 * 60_000L
+        /** 통화가 이어지고 탑승자 위치를 이만큼(초) 기다린 뒤에는 차 위치로 찾아요. */
+        const val PAX_WAIT_S = 8
+        /** 시연 자막 한 줄이 오면 말하는 사람 고리를 켜 두는 시간. */
+        const val DEMO_TALK_MS = 1_800L
+        /** 통화가 끝나고 서버가 정리할 시간을 준 뒤 장소를 다시 확인해요. */
+        const val PLACE_AFTER_CALL_MS = 6_000L
         /** 내비 앱이 경로를 계산하고 안내 시작 카운트다운(약 5초)까지 끝내는 데 8~10초가 걸립니다. */
         const val NAVI_TIMEOUT_MS = 20_000L
         const val NAVI_LATE_MS = 40_000L
+        /** 재탐색(requestReRoute) 콜백을 이만큼 기다리고, 없으면 경유지를 넣은 경로로 다시 요청해요. */
+        const val REROUTE_FALLBACK_MS = 8_000L
         const val VEHICLE_TIMEOUT_MS = 8_000L
         const val BANNER_MS = 10_000L
         val TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
         val DRIVING_STATUSES = setOf("planned", "active")
 
         /** 한 번에 하나만 보여 줍니다. 답이 필요한 질문이 먼저입니다. */
-        val PROPOSAL_ORDER = listOf("ask", "change", "vehicle_action", "plan")
+        val PROPOSAL_ORDER = listOf("ask", "change", "stop", "route", "vehicle_action", "plan")
     }
 }

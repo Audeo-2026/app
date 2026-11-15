@@ -7,6 +7,7 @@ import com.audeo.app.server.IceServerInfo
 import org.json.JSONObject
 import org.webrtc.AudioTrack
 import org.webrtc.AudioTrackSink
+import org.webrtc.DataChannel
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.PeerConnection
@@ -24,6 +25,9 @@ import java.nio.ByteBuffer
  * - 신호 규칙: 통화가 연결되면(active) 건 쪽이 offer를 만들고, 받은 쪽이 answer를 돌려줍니다. ICE 후보는 서로 보냅니다.
  *   payload는 브라우저와 같은 모양입니다: offer/answer = {type, sdp}, ice = {candidate, sdpMid, sdpMLineIndex}.
  * - 받아쓰기용으로 내 마이크 소리([Listener.onLocalAudio])와 상대 소리([Listener.onRemoteAudio])를 PCM 16비트로 넘겨줍니다.
+ * - 같은 연결에 데이터 채널("audeo")을 하나 엽니다. 탑승자 휴대폰이 통화 중 정밀 위치를 여기로 보내요
+ *   ({"t":"loc","lat","lng","acc","at"}). 서버를 거치지 않고 차와 휴대폰 사이에서만 오가요.
+ *   건 쪽이 offer 전에 채널을 만들고, 받은 쪽은 onDataChannel로 받습니다.
  */
 class CallAudio(context: Context, private val listener: Listener) {
 
@@ -34,6 +38,8 @@ class CallAudio(context: Context, private val listener: Listener) {
         fun onLocalAudio(pcm: ByteArray, sampleRate: Int, channels: Int)
         fun onRemoteAudio(pcm: ByteArray, sampleRate: Int, channels: Int)
         fun onLog(message: String)
+        /** 상대 기기가 데이터 채널로 보낸 메시지(JSON). */
+        fun onPeerMessage(message: JSONObject) = Unit
     }
 
     private val app = context.applicationContext
@@ -43,6 +49,7 @@ class CallAudio(context: Context, private val listener: Listener) {
     private var pc: PeerConnection? = null
     private var localTrack: AudioTrack? = null
     private var remoteTrack: AudioTrack? = null
+    private var data: DataChannel? = null
     private var remoteDescriptionSet = false
     private val pendingIce = ArrayList<IceCandidate>()
     private var savedAudioMode = AudioManager.MODE_NORMAL
@@ -75,7 +82,10 @@ class CallAudio(context: Context, private val listener: Listener) {
         savedAudioMode = audioManager.mode
         runCatching { audioManager.mode = AudioManager.MODE_IN_COMMUNICATION }
         listener.onLog("통화 음성 준비 (${if (caller) "offer를 보냄" else "offer를 기다림"})")
-        if (caller) createOffer()
+        if (caller) {
+            pc?.createDataChannel("audeo", DataChannel.Init())?.let(::useDataChannel)
+            createOffer()
+        }
     }
 
     fun onRemoteSignal(kind: String, payload: JSONObject) {
@@ -119,6 +129,8 @@ class CallAudio(context: Context, private val listener: Listener) {
         active = false
         remoteTrack?.removeSink(remoteSink)
         remoteTrack = null
+        data?.let { runCatching { it.unregisterObserver(); it.close(); it.dispose() } }
+        data = null
         runCatching { pc?.close() }
         runCatching { pc?.dispose() }
         pc = null
@@ -159,6 +171,29 @@ class CallAudio(context: Context, private val listener: Listener) {
             .createAudioDeviceModule()
         adm = module
         factory = PeerConnectionFactory.builder().setAudioDeviceModule(module).createPeerConnectionFactory()
+    }
+
+    /** 데이터 채널로 상대에게 보냅니다(열려 있을 때만). */
+    fun send(message: JSONObject): Boolean {
+        val ch = data?.takeIf { it.state() == DataChannel.State.OPEN } ?: return false
+        val bytes = message.toString().toByteArray(Charsets.UTF_8)
+        return ch.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+    }
+
+    private fun useDataChannel(ch: DataChannel) {
+        data = ch
+        ch.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) = Unit
+            override fun onStateChange() {
+                if (ch.state() == DataChannel.State.OPEN) listener.onLog("데이터 채널 열림(탑승자 위치)")
+            }
+
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                val bytes = ByteArray(buffer.data.remaining())
+                buffer.data.get(bytes)
+                runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.onSuccess(listener::onPeerMessage)
+            }
+        })
     }
 
     private fun createOffer() {
@@ -218,7 +253,7 @@ class CallAudio(context: Context, private val listener: Listener) {
         override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
         override fun onAddStream(stream: org.webrtc.MediaStream) = Unit
         override fun onRemoveStream(stream: org.webrtc.MediaStream) = Unit
-        override fun onDataChannel(channel: org.webrtc.DataChannel) = Unit
+        override fun onDataChannel(channel: DataChannel) = useDataChannel(channel)
         override fun onRenegotiationNeeded() = Unit
     }
 

@@ -12,6 +12,11 @@ build/
 # Build outputs
 *.apk
 *.aab
+# 제출용 APK는 저장소에 둬요(apk/<팀명>_<앱이름>_release.apk)
+!apk/*.apk
+# 키스토어는 커밋하지 않아요
+*.jks
+*.keystore
 
 # OS
 .DS_Store

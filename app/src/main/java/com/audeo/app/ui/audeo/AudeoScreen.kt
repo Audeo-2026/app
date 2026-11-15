@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -119,7 +120,7 @@ fun AudeoApp(vm: AudeoViewModel) {
                 val shownResult = rememberLast(s.result)
                 AnimatedVisibility(visible = s.result != null, enter = Motion.barEnter(), exit = Motion.barExit()) {
                     val result = shownResult ?: return@AnimatedVisibility
-                    ResultBanner(result, Modifier.width(860.dp)) {
+                    ResultBanner(result, Modifier.width(720.dp)) {
                         if (result.state != ResultState.PENDING) {
                             AudeoButton(null, vm::dismissResult, size = ButtonSize.MD, variant = ButtonVariant.QUIET, icon = AudeoIcon.Close, description = "닫기")
                         }
@@ -127,34 +128,74 @@ fun AudeoApp(vm: AudeoViewModel) {
                 }
             }
 
-            // 아래: 오디 + 비서 시트
+            // 아래: 오디 + 비서 시트(운전 중 내비 위에 뜨는 오디와 같은 것)
             val reserved = (if (liveCall != null) CALL_PANEL_H else 0.dp) + (if (s.result != null) RESULT_H else 0.dp)
-            val sheetMax = (screenH - reserved - ODI_RISE - Space.s3 * 3).coerceAtLeast(360.dp)
-            Box(
+            val sheetMax = (screenH - reserved - ODI_RISE - Space.s3 * 3).coerceIn(320.dp, SHEET_MAX_H)
+            AssistantDock(
+                s,
+                vm,
+                sheetMax,
                 Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
+                    .align(Alignment.BottomStart)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(start = Space.s3, end = Space.s3, bottom = Space.s3)
                     .onSizeChanged { sheetPx = it.height },
+            )
+            // 오른쪽: 탑승자가 가까워지면 '탑승자 찾기'(통화 중 탑승자 휴대폰이 보낸 정밀 위치)
+            var finderShown by remember { mutableStateOf(false) }
+            finderShown = showPassengerFinder(s, finderShown)
+            AnimatedVisibility(
+                visible = finderShown,
+                enter = Motion.barEnter(),
+                exit = Motion.barExit(),
+                modifier = Modifier.align(Alignment.TopEnd).windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 96.dp, end = Space.s3),
             ) {
-                val sheetEnter = Motion.sheetEnter()
-                AnimatedContent(
-                    targetState = DialogFrame(dialogKey(s), s),
-                    contentKey = { it.key },
-                    contentAlignment = Alignment.BottomCenter,
-                    transitionSpec = { sheetEnter togetherWith Motion.sheetExit() using SizeTransform(clip = false) },
-                    label = "sheet",
-                ) { frame -> SceneSheet(frame.state, vm, sheetMax) }
-                Odi(
-                    mode = odiMode(s),
-                    size = ODI_SIZE,
-                    modifier = Modifier.align(Alignment.TopStart).offset(x = Space.s3, y = -ODI_RISE),
-                )
+                PassengerFinder(s, Modifier.width(460.dp))
             }
             DevPanel(s, vm, Modifier.align(Alignment.TopEnd).windowInsetsPadding(WindowInsets.safeDrawing).padding(Space.s3))
         }
     }
+}
+
+/**
+ * 오디 + 비서 시트. 평소엔 오디와 한 줄로 접어 두고, 운전자가 직접 골라야 할 때만 펼칩니다.
+ * 앱 화면 아래와, 운전 중 내비 위에 떠 있는 오디(AssistantOverlay)가 함께 씁니다.
+ * 운전자가 접거나 펼친 것은 그 장면(제안) 동안만 기억해요. 새 결정이 오면 다시 기본값을 따릅니다.
+ */
+@Composable
+internal fun AssistantDock(s: AudeoUiState, vm: AudeoViewModel, sheetMax: Dp, modifier: Modifier = Modifier) {
+    var manual by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    fun openFor(f: DialogFrame) = manual?.takeIf { it.first == f.key }?.second ?: needsAttention(f.state)
+    val frame = DialogFrame(dialogKey(s), s)
+    Box(modifier.widthIn(max = SHEET_MAX_W)) {
+        val sheetEnter = Motion.sheetEnter()
+        AnimatedContent(
+            targetState = frame,
+            contentKey = { it.key },
+            contentAlignment = Alignment.BottomStart,
+            transitionSpec = { sheetEnter togetherWith Motion.sheetExit() using SizeTransform(clip = false) },
+            label = "sheet",
+        ) { f ->
+            val o = openFor(f)
+            SceneSheet(f.state, vm, sheetMax, o) { manual = f.key to !o }
+        }
+        val spot = animateOdiSpot(openFor(frame))
+        Odi(
+            mode = odiMode(s),
+            size = spot.size,
+            modifier = Modifier.align(Alignment.TopStart).offset(x = spot.x, y = spot.y),
+        )
+    }
+}
+
+/**
+ * 시트를 펼칠 때: 운전자가 지금 직접 골라야 하는 일(누구에게 전화할지, 전화 받기, 운전자 몫의 제안, 탑승 확인).
+ * 통화 중·정리 중·주행 중·탑승자가 고르는 중·픽업 완료는 오디 한 줄로만 알려 드려요.
+ */
+private fun needsAttention(s: AudeoUiState): Boolean = when (s.scene) {
+    Scene.START, Scene.INCOMING, Scene.ARRIVE -> true
+    Scene.ASK, Scene.PLAN, Scene.CHANGE, Scene.VEHICLE -> s.proposal?.decidedByDriver == true
+    Scene.DIAL, Scene.CALL, Scene.DRIVE, Scene.DONE -> false
 }
 
 /** 오디 표정: 말하는 중·듣는 중이면 그대로, 통화를 같이 듣는 중이면 듣는 얼굴, 서버 답을 기다리면 생각하는 얼굴. */
@@ -167,7 +208,7 @@ private fun odiMode(s: AudeoUiState): VoiceMode = when {
 
 /** 보이스톡 같은 통화 카드에 넣을 내용. */
 @Composable
-private fun CallCard(call: CallInfo, s: AudeoUiState, talking: Set<String>, vm: AudeoViewModel) {
+internal fun CallCard(call: CallInfo, s: AudeoUiState, talking: Set<String>, vm: AudeoViewModel) {
     val ringing = call.status == CallStatus.RINGING
     val me = BuildConfig.AUDEO_DRIVER_SHORT_NAME.ifBlank { BuildConfig.AUDEO_DRIVER_NAME }.ifBlank { "나" }
     CallPanel(
@@ -177,6 +218,8 @@ private fun CallCard(call: CallInfo, s: AudeoUiState, talking: Set<String>, vm: 
         time = when {
             ringing && call.outgoing -> "연결하는 중…"
             ringing -> "Audeo 통화가 왔어요"
+            // 시연 탑승자는 서버가 받아 대본 자막으로 이어가요(음성 연결 없음).
+            call.demo -> "${s.callDuration} · 시연 통화"
             s.callAudioState == "failed" -> "${s.callDuration} · 음성 연결 실패"
             s.callAudioState != "connected" -> "${s.callDuration} · 음성 연결 중"
             else -> s.callDuration
@@ -197,13 +240,15 @@ private fun CallCard(call: CallInfo, s: AudeoUiState, talking: Set<String>, vm: 
 }
 
 @Composable
-private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
+private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp, open: Boolean, toggle: () -> Unit) {
     val c = Audeo.colors
     val call = s.call
     val peer = call?.peerCallName ?: s.journey?.passengerCallName ?: "상대방"
     val me = BuildConfig.AUDEO_DRIVER_SHORT_NAME.ifBlank { null }
     when (s.scene) {
         Scene.START -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             kicker = if (me != null) "${me}님, 안녕하세요" else "안녕하세요",
             speech = "오늘 누구를 만나러 가나요?",
@@ -229,6 +274,8 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
         }
 
         Scene.DIAL -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             kicker = if (call?.analysisRequested == true) "같이 들어도 될지 묻는 중" else "전화 거는 중",
             speech = "${peer}께 전화하고 있어요",
@@ -250,6 +297,8 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
         }
 
         Scene.INCOMING -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             kicker = "전화가 왔어요",
             speech = "${peer} 전화예요. 제가 같이 들을까요?",
@@ -267,12 +316,15 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
 
         Scene.CALL -> when {
             call == null -> AssistantSheet(
-                maxHeight = maxHeight,
+                expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
                 kicker = "통화가 끝났어요",
                 speech = "들은 내용으로 약속을 정리하고 있어요",
                 subtitle = s.journey?.summary,
                 status = PlanStatus.DRAFT,
                 voice = s.voice,
+                chip = Chip("정리 중"),
                 footnote = "정리가 끝나면 확인할 것과 계획을 보여 드릴게요.",
                 question = "기다리기 어렵다면",
                 branches = listOf(Branch("처음으로", "정리를 멈추고 처음 화면으로 가요", ButtonVariant.QUIET, onClick = vm::restart)),
@@ -281,17 +333,22 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
             call.analysisOn -> {
                 val fields = s.journey?.fields.orEmpty()
                 AssistantSheet(
-                    maxHeight = maxHeight,
+                    expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
                     kicker = "통화를 같이 듣고 있어요",
                     speech = if (fields.isEmpty()) "약속 이야기가 나오면 바로 정리할게요" else "${s.journey?.title ?: peer} 약속을 정리하고 있어요",
                     status = PlanStatus.DRAFT,
                     voice = s.voice,
+                    chip = Chip("같이 듣는 중", Tone.BRAND),
                     footnote = "확인되지 않은 내용은 확정하지 않아요.",
                 ) { if (fields.isNotEmpty()) PlanFields(fields) }
             }
 
             else -> AssistantSheet(
-                maxHeight = maxHeight,
+                expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
                 tone = Tone.NEUTRAL,
                 kicker = "일반 통화",
                 speech = "이번 통화는 듣지 않을게요",
@@ -300,18 +357,26 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
             )
         }
 
-        Scene.ASK, Scene.PLAN, Scene.CHANGE, Scene.VEHICLE -> s.proposal?.let { ProposalSheet(it, s, vm, maxHeight) }
+        Scene.ASK, Scene.PLAN, Scene.CHANGE, Scene.VEHICLE -> s.proposal?.let { ProposalSheet(it, s, vm, maxHeight, open, toggle) }
 
         Scene.DRIVE -> {
             val j = s.journey
             val co = s.coordination
             val meet = j?.meetPlace?.name?.let { pl -> j.meetAtLabel?.let { "${it}에 ${pl}에서 만나요" } ?: "${pl}에서 만나요" }
             AssistantSheet(
-                maxHeight = maxHeight,
+                expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
                 kicker = "${j?.passengerCallName ?: peer}께 가는 중이에요",
                 speech = meet ?: "만날 곳으로 가고 있어요",
                 status = PlanStatus.ACTIVE,
                 voice = s.voice,
+                chip = co?.lanes?.firstOrNull { it.tone == LaneTone.VEHICLE }?.at?.let { Chip("도착 $it", Tone.BRAND) },
+                question = "길안내는 내비가 해요",
+                branches = listOf(
+                    Branch("내비 보기", "길안내 화면으로 돌아가요. 오디는 그 위에 떠 있어요", ButtonVariant.PRIMARY, AudeoIcon.Navigate, onClick = vm::showNavi),
+                    Branch("픽업 취소", "위치 공유를 끝내고 처음 화면으로 가요", ButtonVariant.QUIET, onClick = vm::cancelJourney),
+                ),
                 footnote = co?.nextAction ?: "중요한 변화가 생기면 바로 알려 드릴게요.",
             ) {
                 if (co != null && co.lanes.isNotEmpty()) {
@@ -326,7 +391,9 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
             val a = s.coordination?.arrival
             val passengerLane = s.coordination?.lanes?.firstOrNull { it.tone != LaneTone.VEHICLE }
             AssistantSheet(
-                maxHeight = maxHeight,
+                expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
                 kicker = "거의 다 왔어요",
                 speech = a?.title ?: "곧 도착해요",
                 figureLabel = a?.figureLabel,
@@ -335,6 +402,7 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
                 voice = s.voice,
                 footnote = "가까워지거나 멈춘 것만으로는 탑승을 확정하지 않아요.",
                 question = "${s.journey?.passengerCallName ?: peer}이 탔나요?",
+                chip = Chip("탑승 확인", Tone.CAUTION),
                 branches = listOf(
                     Branch("탔어요", "픽업을 마치고 위치 공유를 끝내요", ButtonVariant.PRIMARY, AudeoIcon.Check, onClick = vm::boarded),
                     Branch("아직이에요", "조금 더 기다릴게요", onClick = vm::notYet),
@@ -346,7 +414,9 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
         Scene.DONE -> {
             val name = s.finished?.passengerCallName
             AssistantSheet(
-                maxHeight = maxHeight,
+                expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
                 kicker = "픽업 완료",
                 speech = if (name != null) "오늘도 잘 만났어요. ${name}과 좋은 시간 보내세요!" else "오늘도 잘 만났어요. 좋은 시간 보내세요!",
                 subtitle = "위치 공유와 조율 알림은 모두 껐어요.",
@@ -360,7 +430,7 @@ private fun SceneSheet(s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
 
 /** 서버 제안(질문·계획·변경·차량 준비)을 비서 시트로 그립니다. 선택지는 서버가 정하고, 결과 설명은 제안 내용으로 만듭니다. */
 @Composable
-private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp) {
+private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxHeight: Dp, open: Boolean, toggle: () -> Unit) {
     val c = Audeo.colors
     val passenger = s.journey?.passengerCallName ?: s.call?.peerCallName ?: "탑승자"
     val mine = p.decidedByDriver
@@ -383,14 +453,17 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
                     else -> null
                 },
                 enabled = !s.busy,
-                onClick = { vm.choose(o) },
+                onClick = { vm.choose(p, o) },
             )
         }
     }
     val waiting = if (mine) null else Waiting(passenger, "만날 곳이 바뀌는 일이라 ${passenger}께 물어봤어요. 고르면 바로 알려 드릴게요.")
     val primary = p.options.firstOrNull { it.variant == "primary" }?.label
+    val chip = if (mine) Chip("확인할 게 있어요", Tone.CAUTION) else null
     when (p.kind) {
         "ask" -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             tone = Tone.CAUTION,
             kicker = "하나만 확인할게요",
@@ -401,10 +474,13 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
             question = "답을 골라 주세요",
             branches = branches,
             waiting = waiting,
+            chip = chip,
             voiceHint = primary?.takeIf { mine }?.let { "“$it”라고 말해도 돼요" },
         )
 
         "plan" -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             kicker = "약속을 정리했어요",
             speech = "${p.title} 계획을 세웠어요",
@@ -419,10 +495,13 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
             question = "이대로 출발할까요?",
             branches = branches,
             waiting = waiting,
+            chip = chip,
             voiceHint = if (mine) "“그렇게 해 줘”라고 말해도 돼요" else null,
         ) { s.journey?.fields?.let(::planKeyFields)?.takeIf { it.isNotEmpty() }?.let { PlanFields(it) } }
 
         "change" -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             tone = Tone.CAUTION,
             kicker = if (mine) "계획이 바뀔 것 같아요" else "${passenger}께 물어봤어요",
@@ -434,10 +513,31 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
             question = if (mine) "바꿀까요?" else "누가 정하나요?",
             branches = branches,
             waiting = waiting,
+            chip = chip,
             voiceHint = if (mine) "“그렇게 해 줘”라고 말해도 돼요" else null,
         ) { if (p.rows.isNotEmpty()) ChangeRows(p.rows) }
 
+        "stop", "route" -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
+            maxHeight = maxHeight,
+            tone = Tone.CAUTION,
+            kicker = if (p.kind == "stop") "경유지 제안" else "대체 경로",
+            speech = p.title,
+            subtitle = p.context,
+            reasons = p.reasons,
+            voice = s.voice,
+            footnote = p.footnote,
+            question = if (p.kind == "stop") "들를까요?" else "길을 바꿀까요?",
+            branches = branches,
+            waiting = waiting,
+            chip = chip,
+            voiceHint = primary?.takeIf { mine }?.let { "“$it”라고 말해도 돼요" },
+        ) { if (p.rows.isNotEmpty()) ChangeRows(p.rows) }
+
         "vehicle_action" -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             kicker = "타기 전에 준비해 둘까요?",
             speech = p.title,
@@ -448,10 +548,13 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
             question = "${passenger} 타기 전에",
             branches = branches,
             waiting = waiting,
+            chip = chip,
             voiceHint = if (mine) "“그렇게 해 줘”라고 말해도 돼요" else null,
         ) { if (p.rows.isNotEmpty()) ChangeRows(p.rows) }
 
         else -> AssistantSheet(
+            expanded = open,
+            onToggle = toggle,
             maxHeight = maxHeight,
             tone = Tone.NEUTRAL,
             kicker = p.context,
@@ -461,6 +564,7 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
             footnote = p.footnote,
             branches = branches,
             waiting = waiting,
+            chip = chip,
         ) { if (p.rows.isNotEmpty()) ChangeRows(p.rows) }
     }
 }
@@ -468,14 +572,17 @@ private fun ProposalSheet(p: Proposal, s: AudeoUiState, vm: AudeoViewModel, maxH
 /** 고르면 어떻게 되는지 한 줄. 서버 선택지에는 설명이 없어서 제안 내용(바뀌는 값)으로 만듭니다. */
 private fun outcomeOf(p: Proposal, o: ProposalOption, s: AudeoUiState): String? {
     val place = s.journey?.meetPlace?.name
-    fun after() = p.rows.joinToString(" · ") { "${it.label} ${it.to}" }.ifEmpty { null }
-    fun before() = p.rows.joinToString(" · ") { it.from }.ifEmpty { null }
+    // 서버는 값이 없던 칸을 "-"로 보내요(예: 경유지 - → 주유소). 그런 칸은 설명에서 빼요.
+    fun after() = p.rows.filter { it.to != "-" }.joinToString(" · ") { "${it.label} ${it.to}" }.ifEmpty { null }
+    fun before() = p.rows.map { it.from }.filter { it != "-" }.joinToString(" · ").ifEmpty { null }
     return when {
         o.id == "apply_navi" -> place?.let { "${ro(it)} 길안내를 시작해요" } ?: "내비 길안내를 시작해요"
         o.id == "save_only" -> "계획만 저장하고 내비는 그대로 둬요"
         o.id == "later" -> "확실해지면 다시 물어볼게요"
         p.kind == "ask" -> null
         o.id == "hvac_only" -> p.rows.firstOrNull { "온도" in it.label }?.let { "${it.label} ${it.to}만 맞춰요" } ?: "온도만 맞춰요"
+        p.kind == "stop" && o.variant != "primary" -> "들르지 않고 바로 가요"
+        p.kind == "route" && o.variant != "primary" -> "지금 길로 계속 가요 · 경유지는 그대로예요"
         o.variant == "primary" -> after() ?: "이대로 진행해요"
         o.id in setOf("keep", "no", "skip", "reject") -> before()?.let { "지금 그대로 · $it" } ?: "지금 그대로 둬요"
         else -> null
@@ -502,13 +609,13 @@ private fun consentField(peer: String, consent: String?) = when (consent) {
     else -> PlanField(peer, placeholder = "응답 기다리는 중", source = SourceKind.CONFIRM)
 }
 
-private class DialogFrame(val key: String, val state: AudeoUiState)
+internal class DialogFrame(val key: String, val state: AudeoUiState)
 
 private fun dialogKey(s: AudeoUiState): String = "${s.scene}|${s.proposal?.id.orEmpty()}|${s.call?.status ?: "none"}"
 
 /** 사라지는 애니메이션 동안 마지막 값을 계속 그리려고 기억해 둡니다(상태가 아니라 다시 그리기를 일으키지 않음). */
 @Composable
-private fun <T : Any> rememberLast(value: T?): T? {
+internal fun <T : Any> rememberLast(value: T?): T? {
     val holder = remember { arrayOfNulls<Any>(1) }
     if (value != null) holder[0] = value
     @Suppress("UNCHECKED_CAST")

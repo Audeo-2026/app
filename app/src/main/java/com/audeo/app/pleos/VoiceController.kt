@@ -38,6 +38,12 @@ class VoiceController(context: Context) {
     @Volatile private var sttReady = false
     @Volatile private var listening = false
 
+    /**
+     * 마이크로 운전자 답을 듣는 중(listen()부터 최종 결과까지). 통화 받아쓰기(PCM)가 시간을 넘겨
+     * 결과가 늦게 오면 이 값이 false라서 운전자 말로 처리하지 않고 버려요.
+     */
+    @Volatile private var micSession = false
+
     /** PCM 받아쓰기를 기다리는 중이면 결과를 여기로 보냅니다(마이크 답으로 처리하지 않음). */
     @Volatile private var pcmWaiter: ((String?) -> Unit)? = null
 
@@ -91,6 +97,7 @@ class VoiceController(context: Context) {
         runCatching { stt.request() }
             .onSuccess {
                 listening = true
+                micSession = true
                 callbacks?.onListening(true)
             }
             .onFailure { callbacks?.onLog("STT 요청 실패: ${it.message}") }
@@ -103,6 +110,7 @@ class VoiceController(context: Context) {
     fun recognizePcm(pcm: ByteArray, timeoutSeconds: Long = 10): String? = synchronized(this) {
         if (!sttReady) return null
         if (listening) runCatching { stt.stop() }.also { listening = false }
+        micSession = false
         val latch = CountDownLatch(1)
         var result: String? = null
         pcmWaiter = { text ->
@@ -119,6 +127,7 @@ class VoiceController(context: Context) {
     }
 
     fun stopListening() {
+        micSession = false
         if (!listening) return
         runCatching { stt.stop() }
         listening = false
@@ -163,7 +172,13 @@ class VoiceController(context: Context) {
                 if (completed) waiter(stt)
                 return
             }
+            if (!micSession) {
+                // 시간을 넘긴 통화 받아쓰기의 늦은 결과예요. 운전자 답이 아니니 버립니다.
+                if (completed) callbacks?.onLog("늦게 온 통화 받아쓰기 결과는 버려요: $stt")
+                return
+            }
             if (completed) {
+                micSession = false
                 listening = false
                 callbacks?.onListening(false)
                 callbacks?.onHeard(stt)
@@ -187,6 +202,7 @@ class VoiceController(context: Context) {
                 waiter(null)
                 return
             }
+            micSession = false
             listening = false
             callbacks?.onListening(false)
             callbacks?.onLog("STT 오류: $errorType")
