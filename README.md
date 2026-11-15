@@ -17,7 +17,7 @@
 | 항목 | 내용 |
 | --- | --- |
 | 파일 | [`apk/Audeo_Audeo_release.apk`](apk/Audeo_Audeo_release.apk) |
-| 빌드 | release, 서명됨, ABI `arm64-v8a` |
+| 빌드 | release, 서명됨, ABI `arm64-v8a`(Mac 에뮬레이터·차량), `x86_64`(Windows·Linux 에뮬레이터) |
 | 패키지 / 버전 | `com.audeo.app` / 0.1.0 (versionCode 1) |
 | 접속 서버 | `https://audeo.mosslab.dev/api/v1/` (APK에 들어 있음, 따로 설정할 것 없음) |
 
