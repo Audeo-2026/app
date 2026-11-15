@@ -28,13 +28,13 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        // Pleos 에뮬레이터·차량은 arm64예요. 다른 ABI의 네이티브 라이브러리(WebRTC·MapLibre)를 빼서 APK를 줄여요.
-        ndk { abiFilters += "arm64-v8a" }
+        // Pleos Connect 에뮬레이터 이미지(Mac arm64, Windows·Linux x86_64)에 필요한 것만 넣어 APK 크기를 줄인다.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
 
         // Audeo 서버(v1). 초대 코드로 차량 기기를 등록하고, 받은 기기 토큰으로 나머지 API를 부릅니다.
         val server = mapOf(
             "AUDEO_API_BASE_URL" to localOrEnv("audeo.api.baseUrl", "AUDEO_API_BASE_URL", "https://audeo.mosslab.dev/api/v1/"),
-            "AUDEO_INVITE_CODE" to localOrEnv("audeo.inviteCode", "AUDEO_INVITE_CODE", localProps.getProperty("audeo.api.key") ?: ""),
+            "AUDEO_INVITE_CODE" to localOrEnv("audeo.inviteCode", "AUDEO_INVITE_CODE", localProps.getProperty("audeo.api.key") ?: "audeo"),
             "AUDEO_DRIVER_NAME" to localOrEnv("audeo.driver.name", "AUDEO_DRIVER_NAME", "운전자"),
             "AUDEO_DRIVER_SHORT_NAME" to localOrEnv("audeo.driver.shortName", "AUDEO_DRIVER_SHORT_NAME"),
             "AUDEO_DRIVER_PHONE" to localOrEnv("audeo.driver.phone", "AUDEO_DRIVER_PHONE"),
@@ -44,19 +44,12 @@ android {
         server.forEach { (name, value) -> buildConfigField("String", name, "\"${value.replace("\"", "\\\"")}\"") }
     }
 
-    /*
-     * release 서명. 키스토어 파일과 비밀번호는 커밋하지 않고 local.properties나 환경 변수로 넣어요.
-     *   audeo.release.storeFile=/절대/경로/audeo-release.jks   (AUDEO_RELEASE_STORE_FILE)
-     *   audeo.release.storePassword=…                          (AUDEO_RELEASE_STORE_PASSWORD)
-     *   audeo.release.keyAlias=audeo                           (AUDEO_RELEASE_KEY_ALIAS)
-     *   audeo.release.keyPassword=…                            (AUDEO_RELEASE_KEY_PASSWORD)
-     * 설정이 없으면 이 컴퓨터의 debug 키로 서명해요(설치는 되지만 다른 컴퓨터에서 빌드한 APK로는 덮어쓸 수 없어요).
-     */
-    val releaseStore = localOrEnv("audeo.release.storeFile", "AUDEO_RELEASE_STORE_FILE").takeIf { it.isNotBlank() }?.let(::file)
+    // 제출용 release 서명. local.properties(audeo.release.*) 또는 환경 변수에 키가 없으면 debug 키로 서명해서라도 설치되게 한다.
+    val releaseStore = localOrEnv("audeo.release.storeFile", "AUDEO_RELEASE_STORE_FILE")
     signingConfigs {
-        if (releaseStore != null) {
+        if (releaseStore.isNotEmpty()) {
             create("release") {
-                storeFile = releaseStore
+                storeFile = file(releaseStore)
                 storePassword = localOrEnv("audeo.release.storePassword", "AUDEO_RELEASE_STORE_PASSWORD")
                 keyAlias = localOrEnv("audeo.release.keyAlias", "AUDEO_RELEASE_KEY_ALIAS", "audeo")
                 keyPassword = localOrEnv("audeo.release.keyPassword", "AUDEO_RELEASE_KEY_PASSWORD")
