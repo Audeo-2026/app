@@ -24,6 +24,9 @@ enum class AudeoIcon(private val paths: List<String>) {
     ArrowRight(listOf("M4 12h15", "M13 6l6 6-6 6")),
     Refresh(listOf("M20 11a8 8 0 1 0-2.3 5.7", "M20 5v6h-6")),
     Edit(listOf("M4 20h4L19 9l-4-4L4 16z", "M13.5 6.5l4 4")),
+    Speaker(listOf("M4 9.5h3.5L12 5v14l-4.5-4.5H4z", "M16 9a4 4 0 0 1 0 6", "M18.5 6.5a7.5 7.5 0 0 1 0 11")),
+    PersonAdd(listOf("M10 4a3.5 3.5 0 1 1 0 7a3.5 3.5 0 1 1 0-7", "M3.5 20a6.5 6.5 0 0 1 13 0", "M19 8v6", "M16 11h6")),
+    Chevron(listOf("M9 6l6 6-6 6")),
     ;
 
     val vector: ImageVector by lazy {

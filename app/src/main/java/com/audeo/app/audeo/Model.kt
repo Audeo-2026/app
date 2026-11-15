@@ -19,6 +19,8 @@ enum class Scene(val label: String) {
 enum class SourceKind(val label: String) {
     CONVERSATION("대화"),
     LOOKUP("조회"),
+    /** 실제 API가 아닌 시연 시간표·예시 값. 조회처럼 보이지 않게 따로 표시해요. */
+    DEMO("시연 데이터"),
     ESTIMATE("추정"),
     CONFIRM("확인 필요"),
     USER("직접 입력"),
@@ -61,11 +63,16 @@ data class EtaLane(val who: String, val at: String, val note: String? = null, va
 
 enum class VoiceMode { LISTENING, SPEAKING, THINKING, IDLE }
 
+/** 서버가 실제로 한 판단(생각 줄)과 자막에서 강조할 말. */
+data class ThinkingUi(val steps: List<String>, val highlights: List<String>, val id: Long)
+
 data class VoiceUi(
     val mode: VoiceMode,
     val who: String? = null,
     val caption: String? = null,
     val hint: String? = null,
+    /** 자막에서 강조할 말(서버가 근거로 든 구절). */
+    val highlights: List<String> = emptyList(),
 )
 
 enum class ResultState { SUCCESS, FAILED, PENDING }
@@ -79,9 +86,33 @@ data class Contact(
     val userId: String? = null,
     /** 부를 때 쓰는 이름(예: 민지님). */
     val callName: String = name,
+    /** 시연 탑승자(서버가 대신 받아 대본 대화를 진행). 이 사람과의 통화는 WebRTC·받아쓰기를 켜지 않아요. */
+    val demo: Boolean = false,
 )
 
-data class Place(val name: String, val latitude: Double, val longitude: Double)
+data class Place(val name: String, val latitude: Double, val longitude: Double, val address: String? = null)
+
+/** 지도에 그릴 한 점(위도, 경도). */
+data class GeoPoint(val lat: Double, val lng: Double)
+
+/** 탑승자 휴대폰이 통화 중 데이터 채널로 보낸 정밀 위치(서버를 거치지 않아요). [accuracy]는 m, [atMillis]는 받은 시각. */
+data class PeerLocation(val lat: Double, val lng: Double, val accuracy: Double?, val atMillis: Long) {
+    val point: GeoPoint get() = GeoPoint(lat, lng)
+}
+
+/**
+ * 시연 녹화용 설정. 에뮬레이터의 Pleos 내비는 GPS를 따라오지 않고(NMEA 체크섬 오류로 버림) 지도도 비어 있어서,
+ * 녹화할 때는 길안내를 시작해도 내비를 앞으로 띄우지 않고 Audeo 지도를 그대로 둡니다. debug 빌드의 시연 도구만 바꿔요.
+ */
+object DemoSettings {
+    @Volatile var keepAudeoInFront: Boolean = false
+
+    /** 시연 시나리오 모드: 서버 분석을 기다리지 않고 녹화 스크립트가 보낸 단계(debug 시연 도구)대로 화면을 움직여요. */
+    @Volatile var scripted: Boolean = false
+
+    /** 시연 도구 → 화면 상태(AudeoViewModel)로 단계를 넘기는 다리. 앱이 켜져 있을 때만 채워져요. */
+    @Volatile var onStep: ((String, Map<String, String>) -> Unit)? = null
+}
 
 // ---------- 서버에서 오는 상태 ----------
 
@@ -101,6 +132,9 @@ data class CallInfo(
     /** 상대방의 AI 분석 동의: pending, granted, declined. */
     val peerConsent: String?,
     val journeyId: String?,
+    val peerUserId: String? = null,
+    /** 시연 탑승자와의 통화. 음성은 서버가 대본 자막(call.transcript)으로 보내요. */
+    val demo: Boolean = false,
 )
 
 data class Figure(val label: String?, val value: String, val note: String?)
@@ -126,7 +160,12 @@ data class Proposal(
     val footnote: String?,
     val voicePrompt: String?,
     val audience: List<String>,
-)
+    /** 이 제안을 결정할 사람(driver, passenger). 서버가 정하고, 다른 역할이 결정하면 403이 납니다. */
+    val approver: String? = null,
+) {
+    /** 운전자가 고르는 제안인지. 서버가 결정자를 탑승자로 정한 제안은 차에서는 지켜보기만 합니다. */
+    val decidedByDriver: Boolean get() = approver == null || approver == "driver"
+}
 
 /** 픽업 여정(서버의 journey). */
 data class Journey(
@@ -138,11 +177,18 @@ data class Journey(
     val fields: List<PlanField>,
     val summary: String?,
     val passengerCallName: String?,
+    val passengerUserId: String? = null,
     val meetPlace: Place?,
     val meetAtLabel: String?,
     val waitPlace: Place?,
+    /** 서버가 아직 정하지 못한 항목 키(place, meet_time …). */
+    val missing: List<String> = emptyList(),
 ) {
     val ended: Boolean get() = status == "completed" || status == "cancelled"
+
+    /** 대화에서 들은 장소 이름. 좌표가 아직 없으면(서버가 모르는 곳) 지도에서 찾아야 해요. */
+    val heardPlace: String? get() = fields.firstOrNull { it.key == "place" }?.value?.takeIf { it.isNotBlank() }
+    val placeUnlocated: Boolean get() = heardPlace != null && meetPlace == null
 }
 
 data class Arrival(val kicker: String?, val title: String, val figure: String?, val figureLabel: String?)
@@ -164,8 +210,10 @@ data class Coordination(
 sealed interface CarCommand {
     data class Route(val place: Place) : CarCommand
     data class AddStop(val place: Place) : CarCommand
-    data class CabinTemperature(val area: String?, val celsius: Float) : CarCommand
-    data class SeatHeat(val area: String?, val level: Int) : CarCommand
+    /** 같은 목적지로 경로 재탐색(경유지는 그대로). [option]은 RouteOption 이름(SHORT_TIME …), 없으면 지금 옵션으로 재탐색. */
+    data class Reroute(val place: Place?, val option: String?) : CarCommand
+    /** 공조·시트·창문·문. [op]는 Vehicle SDK 메서드 이름 그대로(setHvacAc, setDoorPosition …), [args]는 area·on·level·position 등. */
+    data class VehicleOp(val target: String, val op: String, val args: org.json.JSONObject, val label: String, val done: String?) : CarCommand
     data class Unsupported(val target: String, val op: String) : CarCommand
 }
 

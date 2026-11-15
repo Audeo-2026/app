@@ -3,53 +3,119 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Audeo 탑승자 테스트</title>
+<title>Audeo 탑승자</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <style>
-  :root { --ground:#f2f3f5; --surface:#fff; --surface2:#e7e9ed; --line:#cdd2d9; --dialog:#8d95a0; --ink:#0e1013; --muted:#525a65; --brand:#2347f5; --brand-ink:#1f3fd8; --caution:#8a5600; --danger:#b8261a; }
+  :root { --ground:#f2f3f5; --surface:#fff; --surface2:#e7e9ed; --line:#cdd2d9; --dialog:#8d95a0; --ink:#0e1013; --muted:#525a65; --brand:#2347f5; --brand-ink:#1f3fd8; --danger:#b8261a; --night:#0e1013; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--ground); color:var(--ink); font:16px/1.45 "Apple SD Gothic Neo", system-ui, sans-serif; }
   main { max-width:420px; margin:0 auto; padding:24px 16px; display:flex; flex-direction:column; gap:16px; }
   h1 { margin:0; font-size:28px; color:var(--brand-ink); }
   .card { background:var(--surface); border:1px solid var(--dialog); border-radius:20px; padding:16px; display:flex; flex-direction:column; gap:10px; box-shadow:0 8px 24px rgba(14,16,19,.12); }
+  .card[hidden] { display:none; }
   .kicker { font-size:13px; font-weight:600; color:var(--brand-ink); }
   .title { font-size:21px; font-weight:600; }
+  .sub { margin:0; font-size:15px; color:var(--muted); }
+  .sub:empty { display:none; }
   .row { display:flex; justify-content:space-between; gap:8px; font-size:14px; border-top:1px solid var(--line); padding-top:8px; }
   .row:first-of-type { border-top:0; }
   .row span:first-child { color:var(--muted); }
-  .ok { color:var(--brand-ink); font-weight:600; }
-  .bad { color:var(--danger); font-weight:600; }
   .voice { background:var(--surface2); border-radius:12px; padding:12px; font-weight:600; }
   .voice small { display:block; font-weight:500; color:var(--brand-ink); font-size:13px; }
   button { height:52px; border:0; border-radius:12px; padding:0 16px; font:600 17px system-ui; background:var(--surface2); color:var(--ink); }
   button.primary { background:var(--brand); color:#fff; }
   button.danger { background:var(--danger); color:#fff; }
   .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .actions:empty { display:none; }
+  #map { height:240px; border-radius:14px; overflow:hidden; background:var(--surface2); }
+  .pin { padding:4px 10px; border-radius:999px; font:600 13px system-ui; white-space:nowrap; box-shadow:0 2px 8px rgba(14,16,19,.3); }
+  .pin.meet { background:var(--brand); color:#fff; }
+  .pin.car { background:var(--night); color:#fff; }
+  .pin.me { width:18px; height:18px; padding:0; border-radius:50%; background:#1a73e8; border:3px solid #fff; }
+  /* 차가 가까워지면: 나침반(iPhone '나의 찾기'처럼 화살표가 차 쪽을 가리켜요) */
+  .finder { background:var(--night); border-color:var(--night); color:#fff; align-items:center; text-align:center; gap:6px; padding:20px 16px 18px; transition:background .3s; }
+  .finder.on { background:var(--brand); border-color:var(--brand); }
+  .finder .kicker { color:#aab4ff; align-self:flex-start; }
+  .finder.on .kicker { color:#fff; }
+  .dial { position:relative; width:220px; height:220px; display:grid; place-items:center; margin:4px 0; }
+  .dial svg { width:190px; height:190px; transition:transform .35s ease-out; }
+  .ring { position:absolute; inset:30px; border-radius:50%; border:3px solid rgba(255,255,255,.75); animation:ring 1.6s ease-out infinite; }
+  .ring.two { animation-delay:.8s; }
+  @keyframes ring { from { transform:scale(.35); opacity:1; } to { transform:scale(1.15); opacity:0; } }
+  .fdist { font-size:52px; font-weight:700; line-height:1; }
+  .fdist small { font-size:24px; font-weight:600; margin-left:4px; }
+  .fhint { font-size:22px; font-weight:600; }
+  .fnote { font-size:14px; color:rgba(255,255,255,.75); }
+  .finder button { background:rgba(255,255,255,.16); color:#fff; margin-top:6px; }
+  .ride { display:flex; gap:8px; align-items:center; font-size:15px; font-weight:600; color:var(--ink); background:var(--surface2); border-radius:12px; padding:8px 12px; }
+  .ride b { font:700 15px ui-monospace, Menlo, monospace; color:var(--brand-ink); }
+  .ride:empty { display:none; }
   #log { font:12px/1.5 ui-monospace, Menlo, monospace; color:var(--muted); white-space:pre-wrap; max-height:220px; overflow:auto; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Audeo 탑승자</h1>
-  <div class="card">
-    <div class="kicker">통화 시험용 페이지</div>
+  <h1>Audeo</h1>
+  <!-- 통화: 수신·AI 분석 동의·통화 상태 -->
+  <section class="card">
+    <div class="kicker" id="callKicker">통화</div>
     <div class="title" id="headline">연결하는 중</div>
-    <div class="row"><span>서버 실시간 연결</span><b id="ws">-</b></div>
-    <div class="row"><span>통화</span><b id="call">-</b></div>
-    <div class="row"><span>통화 음성(WebRTC)</span><b id="ice">-</b></div>
+    <p class="sub" id="callSub"></p>
     <div class="voice" id="speaking" hidden><small>내가 말하는 중</small><span id="line"></span></div>
     <div class="voice" id="say" hidden><small>Audeo</small><span id="sayText"></span></div>
     <div class="actions" id="actions"></div>
-  </div>
-  <div class="card"><div class="kicker">기록</div><div id="log"></div></div>
+  </section>
+  <!-- 다이얼로그: 서버가 보낸 제안·질문 -->
+  <section class="card" id="ask" hidden>
+    <div class="kicker" id="askKicker"></div>
+    <div class="title" id="askTitle"></div>
+    <div id="askRows"></div>
+    <div class="actions" id="askActions"></div>
+  </section>
+  <!-- 지도: 만날 곳·차·내 위치 -->
+  <section class="card" id="where" hidden>
+    <div class="kicker">만날 곳</div>
+    <div class="title" id="whereTitle"></div>
+    <div class="ride" id="ride"></div>
+    <p class="sub" id="whereSub"></p>
+    <div id="map"></div>
+  </section>
+  <!-- 나침반: 차가 가까워지면 지도 대신 -->
+  <section class="card finder" id="finder" hidden>
+    <div class="kicker" id="fKicker">차가 가까워요</div>
+    <div class="dial">
+      <svg id="fArrow" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 6 L84 74 Q86 79 81 77 L50 62 L19 77 Q14 79 16 74 Z" fill="currentColor"/></svg>
+      <div class="ring" id="fRing1" hidden></div><div class="ring two" id="fRing2" hidden></div>
+    </div>
+    <div class="fdist" id="fDist"></div>
+    <div class="fhint" id="fHint"></div>
+    <div class="fnote" id="fCar"></div>
+    <div class="fnote" id="fNote"></div>
+    <button id="fCompass" hidden>나침반 켜기</button>
+  </section>
+  <section class="card" id="logCard" hidden><div class="kicker">기록</div><div id="log"></div></section>
   <audio id="remote" autoplay playsinline></audio>
 </main>
 <script>
-// 이 페이지는 차량 앱 통화를 시험하는 탑승자 역할입니다.
+// 탑승자 화면(시험용). 보여 주는 것은 네 가지뿐이에요: 통화 수신과 AI 분석 동의, 통화 상태, 서버가 보낸 다이얼로그, 지도.
+// 차가 가까워지면 지도 대신 나침반이 떠서 차 쪽을 가리켜요(iPhone '나의 찾기'처럼).
 // - 전화가 오면 AI 분석에 동의하고 받습니다(?auto=1이면 자동, 아니면 버튼).
 // - 통화 음성은 WebRTC로 차와 직접 잇고, 신호(offer/answer/ice)는 Audeo 서버로 주고받습니다.
-// - 음성이 이어지면 미리 만든 한국어 대사(audio/lineN.wav)를 통화 음성으로 내보냅니다. 차가 이걸 받아씁니다.
-const auto = new URLSearchParams(location.search).get('auto') === '1';
+// - 음성이 이어지면 미리 만든 한국어 대사(audio/…/lineN.wav)를 통화 음성으로 내보냅니다. 차가 이걸 받아씁니다.
+//   ?mic=1 이면 대사 대신 이 컴퓨터 마이크(내 목소리)를 통화로 보냅니다. 이어폰을 끼세요.
+// - 늦어지는 일(화장실 등)은 따로 알리는 화면 없이 '운전자에게 전화'로 말합니다. 오디가 통화를 듣고 계획 변경을 물어요.
+// - ?record=1 이면 통화 음성(내가 보낸 소리 + 차에서 온 소리)을 녹음해서 통화가 끝나면 서버(/upload)에 올립니다.
+// - ?debug=1 이면 맨 아래에 기록을 보여 줍니다.
+// - 통화 중에는 같은 연결의 데이터 채널로 내 정밀 위치를 차에 보내고(서버는 거치지 않아요), 차는 차 위치와 알림을 보내요.
+// - ?script=manual 이면 대사를 자동으로 말하지 않고 시연 도구가 audeoTest.say(n) 으로 정한 시각에 말하게 해요.
+const params = new URLSearchParams(location.search);
+const auto = params.get('auto') === '1';
+const useMic = params.get('mic') === '1';
+const record = params.get('record') === '1';
+const manualScript = params.get('script') === 'manual';
 const $ = (id) => document.getElementById(id);
+if (params.get('debug') === '1') $('logCard').hidden = false;
 const log = (m) => { const t = new Date().toTimeString().slice(0, 8); $('log').textContent = `${t}  ${m}\n` + $('log').textContent; console.log(m); };
 const api = async (method, path, body) => {
   const r = await fetch('/api/' + path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
@@ -62,27 +128,58 @@ let cfg, me, last = 0, call = null, pc = null, ctx = null, dest = null, remoteSe
 // 연결은 한 번만 만들고(peerReady), 받은 신호는 도착 순서대로 하나씩 처리합니다(signalChain).
 // offer·ice가 연결 준비보다 먼저 와도 연결이 둘 생기거나 순서가 꼬이지 않게 하려는 것입니다.
 let peerReady = null, signalChain = Promise.resolve();
+let micStream = null, mix = null, recorder = null, chunks = [], recStart = 0;
+let dc = null, dcTimer = null;
+let wsUp = false, callsMade = 0, journey = null, lastPeer = null, etaLabel = null, endedNote = null;
 const ensurePeer = (caller) => (peerReady ??= startPeer(caller));
 
-function setState(id, text, good) { $(id).textContent = text; $(id).className = good === undefined ? '' : (good ? 'ok' : 'bad'); }
-function headline(t) { $('headline').textContent = t; }
 function actions(list) {
   $('actions').innerHTML = '';
   list.forEach(([label, cls, fn]) => { const b = document.createElement('button'); b.textContent = label; b.className = cls; b.onclick = fn; $('actions').appendChild(b); });
 }
+const peerName = () => journey?.driver?.call_name || lastPeer?.call_name || '운전자';
+const driverId = () => journey?.driver?.user_id || lastPeer?.user_id;
+const iCalled = (c) => c?.caller?.user_id === me?.user?.user_id;
 
 async function start() {
-  cfg = await (await fetch('/config.json')).json();
+  cfg = await (await fetch('/config.json?scenario=' + (params.get('scenario') || 'cold'))).json();
   me = await api('GET', 'devices/me');
   last = (await api('GET', 'events?after_seq=0&wait_s=0')).last_seq || 0;
-  headline(`${me.user.name} · 전화를 기다리는 중`);
+  showIdle();
   connect();
+  refreshJourney();
+}
+
+// ---- 통화 ----
+// 통화가 없을 때: 픽업이 진행 중이면 운전자에게 전화할 수 있어요(늦는다는 말도 통화로 해요).
+function showIdle() {
+  $('callKicker').textContent = '통화';
+  if (journey) {
+    $('headline').textContent = `${peerName()}이 데리러 오고 있어요`;
+    $('callSub').textContent = endedNote || (wsUp ? '' : '서버에 다시 연결하는 중이에요');
+    actions(driverId() ? [[`${peerName()}에게 전화`, 'primary', dial]] : []);
+  } else {
+    $('headline').textContent = '전화를 기다리는 중';
+    $('callSub').textContent = endedNote || (wsUp ? `${me?.user?.name || ''}님 · 운전자가 전화하면 여기서 받아요` : '서버에 다시 연결하는 중이에요');
+    actions([]);
+  }
+}
+
+async function dial() {
+  const id = driverId();
+  if (!id) return;
+  actions([]);
+  try {
+    const c = await api('POST', 'calls', { callee_id: id, analysis_requested: true, caller_role: 'passenger' });
+    log(`${peerName()}에게 거는 중`);
+    onCallState(c);
+  } catch (err) { log('전화를 걸지 못했어요: ' + err.message); showIdle(); }
 }
 
 function connect() {
   const ws = new WebSocket(`${cfg.ws}?token=${cfg.token}&after_seq=${last}`);
-  ws.onopen = () => { setState('ws', '연결됨', true); setInterval(() => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ping' })), 20000); };
-  ws.onclose = () => { setState('ws', '끊김 · 다시 연결', false); setTimeout(connect, 2000); };
+  ws.onopen = () => { wsUp = true; if (!call || call.status === 'ended') showIdle(); setInterval(() => ws.readyState === 1 && ws.send(JSON.stringify({ type: 'ping' })), 20000); };
+  ws.onclose = () => { wsUp = false; if (!call || call.status === 'ended') showIdle(); setTimeout(connect, 2000); };
   ws.onmessage = (m) => {
     const e = JSON.parse(m.data);
     if (e.seq && e.seq <= last) return; // 접속하며 다시 온 지난 이벤트
@@ -96,8 +193,10 @@ function onEvent(e) {
   switch (e.type) {
     case 'call.incoming':
       call = d;
-      setState('call', `${d.from?.call_name || '상대'} 전화 옴`);
-      headline(`${d.from?.call_name || '상대'} 전화예요`);
+      lastPeer = d.from || d.caller;
+      $('callKicker').textContent = '전화가 왔어요';
+      $('headline').textContent = `${d.from?.call_name || '상대'} 전화예요`;
+      $('callSub').textContent = '동의하면 Audeo가 통화를 같이 듣고 만날 시간과 장소를 정리해요. 통화가 끝나면 듣기를 멈춰요.';
       actions([['동의하고 받기', 'primary', () => answer(true)], ['그냥 받기', '', () => answer(false)], ['거절', 'danger', reject]]);
       if (auto) setTimeout(() => answer(true), 2500);
       break;
@@ -106,9 +205,45 @@ function onEvent(e) {
       if (call && d.call_id === call.id) signalChain = signalChain.then(() => onSignal(d.kind, d.payload || {}));
       break;
     case 'agent.say': if (!d.role || d.role === 'passenger') { $('say').hidden = false; $('sayText').textContent = `“${d.text}”`; } break;
-    case 'proposal.created': if ((d.audience || []).includes('passenger')) log(`제안: ${d.kind} · ${d.title}`); break;
+    case 'proposal.created':
+    case 'proposal.updated': onProposal(d); break;
+    case 'journey.updated': setJourney(d); log(e.type); break;
+    case 'journey.ended': $('ask').hidden = true; shownProposal = null; setJourney(null); log('journey.ended'); break;
+    case 'coordination.updated': etaLabel = d.eta_label || null; renderWhere(); break;
+    case 'pong': break;
     default: if (e.type) log(e.type);
   }
+}
+
+// 다이얼로그: 서버가 결정자를 탑승자(approver=passenger)로 정한 제안은 여기서 고릅니다.
+// 운전자가 정하는 제안은 내용만 보여 주고 버튼은 두지 않아요(탑승자가 고르면 서버가 403으로 막습니다).
+let shownProposal = null;
+function onProposal(d) {
+  // 결정이 끝난 제안은 받는 사람 목록과 상관없이 카드를 내립니다(업데이트에는 audience가 빠질 수 있어요).
+  if (d.status && d.status !== 'pending') {
+    if (shownProposal === d.id) { $('ask').hidden = true; shownProposal = null; log(`제안 ${d.kind} · ${d.title} → ${d.status}`); }
+    return;
+  }
+  if (!(d.audience || []).includes('passenger')) return;
+  const mine = d.approver === 'passenger';
+  shownProposal = d.id;
+  $('ask').hidden = false;
+  $('askKicker').textContent = mine ? '골라 주세요' : '운전자가 확인하고 있어요';
+  $('askTitle').textContent = d.question_by_role?.passenger || d.question || d.title;
+  $('askRows').innerHTML = (d.rows || []).map((r) => `<div class="row"><span>${r.label}</span><b>${r.from} → ${r.to}</b></div>`).join('');
+  $('askActions').innerHTML = '';
+  if (!mine) return;
+  (d.options || []).forEach((o) => {
+    const b = document.createElement('button');
+    b.textContent = o.label;
+    b.className = o.variant === 'primary' ? 'primary' : '';
+    b.onclick = async () => {
+      try { const r = await api('POST', `proposals/${d.id}/decision`, { option_id: o.id }); log(`내가 고름: ${o.label} → ${r.status}`); $('ask').hidden = true; }
+      catch (err) { log(`고르지 못했어요: ${err.message}`); }
+    };
+    $('askActions').appendChild(b);
+  });
+  log(`제안: ${d.kind} · ${d.title} (${mine ? '내가 결정' : '운전자가 결정'})`);
 }
 
 async function answer(consent) {
@@ -117,24 +252,34 @@ async function answer(consent) {
   try { onCallState(await api('POST', `calls/${call.id}/answer`, { analysis_consent: consent })); } catch (err) { log('받기 실패: ' + err.message); }
 }
 async function reject() { if (call) onCallState(await api('POST', `calls/${call.id}/reject`)); }
-async function hangup() { if (call) onCallState(await api('POST', `calls/${call.id}/end`)); }
+async function hangup() { if (call && call.status !== 'ended') onCallState(await api('POST', `calls/${call.id}/end`)); }
 
 function onCallState(d) {
   if (call && d.id !== call.id && d.status === 'ended') return;
   const prev = call?.status;
   call = d;
-  const peer = d.caller?.user_id === me.user.user_id ? d.callee : d.caller;
+  const peer = iCalled(d) ? d.callee : d.caller;
+  if (peer) lastPeer = peer;
   if (d.status === 'active') {
-    setState('call', `${peer?.call_name || '상대'}와 통화 중${d.analysis_on ? ' · AI 분석 동의' : ''}`, true);
-    headline('통화 중');
+    $('callKicker').textContent = '통화 중';
+    $('headline').textContent = `${peer?.call_name || '상대'}와 통화 중`;
+    $('callSub').textContent = (d.analysis_on ? 'Audeo가 같이 듣고 약속을 정리해요' : '일반 통화예요 · Audeo는 듣지 않아요') + ' · 통화 중에는 내 위치를 운전자에게 보여 줘요';
     actions([['통화 끊기', 'danger', hangup]]);
-    if (prev !== 'active') ensurePeer(d.caller?.user_id === me.user.user_id);
+    if (prev !== 'active') { callsMade++; ensurePeer(iCalled(d)); startLocating(); }
   } else if (d.status === 'ringing') {
-    setState('call', '연결 중');
+    $('callKicker').textContent = '통화';
+    if (iCalled(d)) {
+      $('headline').textContent = `${peer?.call_name || '상대'}에게 거는 중`;
+      $('callSub').textContent = '받으면 Audeo가 같이 들어요';
+      actions([['취소', 'danger', hangup]]);
+    }
   } else {
-    setState('call', `끝남 (${d.status})`);
-    headline(`${me.user.name} · 전화를 기다리는 중`);
-    actions([]);
+    const analysed = prev === 'active' && d.analysis_on;
+    endedNote = analysed ? '통화가 끝났어요 · Audeo가 약속을 정리하고 있어요' : null;
+    if (endedNote) setTimeout(() => { endedNote = null; if (!call || call.status === 'ended') showIdle(); }, 8000);
+    $('say').hidden = true;
+    showIdle();
+    setTimeout(refreshJourney, 3000);
     closePeer();
   }
 }
@@ -144,17 +289,32 @@ async function startPeer(caller) {
   pc = new RTCPeerConnection({ iceServers: ice });
   ctx = ctx || new AudioContext({ sampleRate: 48000 });
   await ctx.resume();
-  dest = ctx.createMediaStreamDestination();
-  dest.stream.getAudioTracks().forEach((t) => pc.addTrack(t, dest.stream));
+  if (record) mix = ctx.createMediaStreamDestination();
+  if (useMic) {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    micStream.getAudioTracks().forEach((t) => pc.addTrack(t, micStream));
+    if (mix) ctx.createMediaStreamSource(micStream).connect(mix);
+    log('마이크로 말해요(이어폰을 끼세요)');
+  } else {
+    dest = ctx.createMediaStreamDestination();
+    dest.stream.getAudioTracks().forEach((t) => pc.addTrack(t, dest.stream));
+  }
+  pc.ondatachannel = (ev) => useChannel(ev.channel);
+  if (caller) useChannel(pc.createDataChannel('audeo'));
   pc.onicecandidate = (ev) => ev.candidate && signal('ice', { candidate: ev.candidate.candidate, sdpMid: ev.candidate.sdpMid, sdpMLineIndex: ev.candidate.sdpMLineIndex });
-  pc.ontrack = (ev) => { $('remote').srcObject = ev.streams[0] || new MediaStream([ev.track]); $('remote').play().catch(() => {}); log('차 목소리 연결'); };
+  pc.ontrack = (ev) => {
+    const remote = ev.streams[0] || new MediaStream([ev.track]);
+    $('remote').srcObject = remote;
+    $('remote').play().catch(() => {});
+    if (mix) ctx.createMediaStreamSource(remote).connect(mix);
+    log('차 목소리 연결');
+  };
   pc.onconnectionstatechange = () => {
     const s = pc?.connectionState;
-    setState('ice', s, s === 'connected');
     log('음성 연결: ' + s);
-    if (s === 'connected' && !scriptPlayed && call?.analysis_on) { scriptPlayed = true; setTimeout(playScript, 1500); }
+    if (s === 'connected' && mix && !recorder) startRecording();
+    if (s === 'connected' && !useMic && !manualScript && !scriptPlayed && call?.analysis_on) { scriptPlayed = true; setTimeout(() => playScript(callsMade - 1), 1500); }
   };
-  setState('ice', '연결 준비');
   if (caller) {
     const offer = await pc.createOffer({ offerToReceiveAudio: true });
     await pc.setLocalDescription(offer);
@@ -180,33 +340,314 @@ async function onSignal(kind, p) {
     }
   } catch (err) { log(`신호 처리 실패(${kind}): ${err.message}`); }
 }
+// 데이터 채널: 내 위치를 차로 보내고, 차가 보낸 차 위치·알림을 받아요.
+function useChannel(ch) {
+  dc = ch;
+  ch.onopen = () => { log('데이터 채널 열림'); sendLoc(); clearInterval(dcTimer); dcTimer = setInterval(sendLoc, 2000); };
+  ch.onclose = () => { clearInterval(dcTimer); dcTimer = null; };
+  ch.onmessage = (m) => {
+    let d; try { d = JSON.parse(m.data); } catch { return; }
+    if (d.t === 'loc' && d.lat != null) { if (!carOverride) setCar({ lat: d.lat, lng: d.lng, journey_id: journey?.id }); }
+    else if (d.t === 'meet' && d.lat != null) { meetOverride = { name: d.name, lat: d.lat, lng: d.lng }; fitKey = ''; renderWhere(); }
+    else if (d.t === 'note' && d.text) { $('say').hidden = false; $('sayText').textContent = d.text; log('차 알림: ' + d.text); }
+  };
+}
+function sendLoc() {
+  if (!dc || dc.readyState !== 'open' || !myPos) return;
+  dc.send(JSON.stringify({ t: 'loc', lat: myPos.lat, lng: myPos.lng, acc: myPos.acc ?? null, at: Date.now() }));
+}
 function flushIce() { pendingIce.forEach((c) => pc.addIceCandidate(c)); pendingIce = []; }
 function signal(kind, payload) { api('POST', `calls/${call.id}/signal`, { kind, payload }).catch((e) => log(`신호 전송 실패(${kind}): ${e.message}`)); }
 
+function startRecording() {
+  chunks = [];
+  recorder = new MediaRecorder(mix.stream, { mimeType: 'audio/webm;codecs=opus' });
+  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  recorder.onstop = async () => {
+    const blob = new Blob(chunks, { type: 'audio/webm' });
+    const r = await fetch(`/upload?t0=${recStart}`, { method: 'POST', body: blob });
+    log(`통화 녹음 저장: ${(await r.json()).file} (${Math.round(blob.size / 1024)}KB)`);
+  };
+  recStart = Date.now();
+  recorder.start(1000);
+  log('통화 녹음 시작');
+}
+
 function closePeer() {
+  clearInterval(dcTimer); dcTimer = null; dc = null;
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+  recorder = null; mix = null;
+  micStream?.getTracks().forEach((t) => t.stop()); micStream = null;
   if (pc) { pc.close(); pc = null; }
   peerReady = null; signalChain = Promise.resolve();
   remoteSet = false; pendingIce = []; scriptPlayed = false;
-  setState('ice', '-');
   $('speaking').hidden = true;
 }
 
+// 대사 한 줄을 지금 통화 음성으로 말해요(시연 도구가 시각을 맞춰 부릅니다). n번째 통화의 i번째 줄.
+async function sayLine(i, n = callsMade - 1) {
+  const script = cfg.calls?.[n] || cfg.calls?.[0];
+  if (!script || !pc || !dest) return 'no-call';
+  const buf = await ctx.decodeAudioData(await (await fetch(script.files[i])).arrayBuffer());
+  $('speaking').hidden = false;
+  $('line').textContent = `“${script.texts[i]}”`;
+  log(`말하기 ${i + 1}: ${script.texts[i]}`);
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(dest); if (mix) src.connect(mix);
+  src.onended = () => { $('speaking').hidden = true; };
+  src.start();
+  return 'ok';
+}
+
 // 미리 만든 대사를 차례로 통화 음성에 흘려보냅니다(차에서는 이 목소리를 받아써요).
-async function playScript() {
-  for (let i = 1; i <= cfg.lines; i++) {
+// n번째 통화(0부터)의 대사를 씁니다. 내가 건 전화면 말을 마치고 끊어요.
+async function playScript(n) {
+  const script = cfg.calls?.[n];
+  if (!script) return;
+  for (let i = 0; i < script.texts.length; i++) {
     if (!pc || pc.connectionState !== 'connected') return;
-    const buf = await ctx.decodeAudioData(await (await fetch(`audio/line${i}.wav`)).arrayBuffer());
+    const buf = await ctx.decodeAudioData(await (await fetch(script.files[i])).arrayBuffer());
     $('speaking').hidden = false;
-    $('line').textContent = `“${cfg.texts[i - 1]}”`;
-    log(`말하기 ${i}: ${cfg.texts[i - 1]}`);
-    await new Promise((res) => { const s = ctx.createBufferSource(); s.buffer = buf; s.connect(dest); s.onended = res; s.start(); });
+    $('line').textContent = `“${script.texts[i]}”`;
+    log(`말하기 ${i + 1}: ${script.texts[i]}`);
+    await new Promise((res) => {
+      const s = ctx.createBufferSource();
+      s.buffer = buf;
+      s.connect(dest);
+      if (mix) s.connect(mix);
+      s.onended = res;
+      s.start();
+    });
     await new Promise((res) => setTimeout(res, 2500));
   }
   $('speaking').hidden = true;
   log('대사를 모두 말했어요');
+  if (auto && iCalled(call)) setTimeout(hangup, 1500);
 }
 
-start().catch((e) => { headline('시작하지 못했어요'); log(e.message); });
+// ---- 픽업과 지도 ----
+async function refreshJourney() {
+  try {
+    const js = (await api('GET', 'journeys')).journeys || [];
+    setJourney(js.find((j) => !['completed', 'cancelled'].includes(j.status)) || null);
+  } catch (err) { log('픽업 정보를 못 불러왔어요: ' + err.message); }
+}
+function setJourney(j) {
+  journey = j && !['completed', 'cancelled'].includes(j.status) ? j : null;
+  if (!journey) { carPos = null; etaLabel = null; carOverride = false; meetOverride = null; stopLocating(); }
+  pollCar();
+  if (!call || call.status === 'ended') showIdle();
+  renderWhere();
+}
+let meetOverride = null; // 차가 통화 데이터 채널로 알려 준 만날 곳(서버 반영 전에도 바로 보여요)
+const meetPlace = () => { if (meetOverride) return meetOverride; const p = journey?.plan?.meet_place || journey?.draft_plan?.meet_place; return p?.lat != null ? p : null; };
+const meetAt = () => journey?.plan?.meet_at_label || journey?.draft_plan?.meet_at_label;
+
+let map = null, mapReady = false, marks = {}, fitKey = '', shownMeet = null;
+function renderWhere() {
+  const meet = meetPlace();
+  if (!meet) { $('where').hidden = true; $('finder').hidden = true; return; }
+  startLocating();
+  const ride = journey?.fields?.find((f) => f.key === 'transport' && (f.code || /KTX|SRT|ITX|편/.test(f.value || '')));
+  $('ride').innerHTML = ride ? `<span>타고 오는 열차</span><b>${ride.value.split('·')[0].trim()}</b><span>${(ride.value.split('·')[1] || '').trim()}</span>` : '';
+  const d = myPos && carPos ? distance(myPos, carPos) : null;
+  // 300m 안으로 오면 나침반, 350m 밖으로 멀어지면 다시 지도(경계에서 깜빡이지 않게)
+  const wasOn = finderOn;
+  finderOn = d != null && d <= (finderOn ? NEAR_M + 50 : NEAR_M);
+  if (finderOn && !wasOn) log(`차 찾기 나침반 켜짐 · ${Math.round(d)}m`);
+  if (meet.name !== shownMeet) { shownMeet = meet.name; log(`만날 곳 지도: ${meet.name}`); }
+  $('where').hidden = finderOn;
+  $('finder').hidden = !finderOn;
+  if (finderOn) { renderFinder(d); return; }
+  $('whereTitle').textContent = `${meet.name}에서 만나요`;
+  const bits = [];
+  if (meetAt()) bits.push(`${meetAt()}에 만나요`);
+  if (etaLabel) bits.push(`차 도착까지 ${etaLabel}`);
+  if (locNote) bits.push(locNote);
+  $('whereSub').textContent = bits.join(' · ');
+  drawMap(meet);
+}
+
+function drawMap(meet) {
+  if (!window.maplibregl) { $('map').hidden = true; return; }
+  if (!map) {
+    map = new maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/liberty', center: [meet.lng, meet.lat], zoom: 15, attributionControl: { compact: true } });
+    map.on('load', () => {
+      mapReady = true;
+      // 지도 출처 표시는 (i) 버튼으로 접어 둡니다(누르면 펼쳐져요).
+      document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
+      drawMap(meetPlace() || meet);
+    });
+    return;
+  }
+  map.resize();
+  mark('meet', meet, 'pin meet', meet.name);
+  mark('car', carPos, 'pin car', '차');
+  mark('me', myPos, 'pin me', '');
+  // 보이는 점이 바뀔 때만 화면을 맞춥니다(위치가 조금씩 움직일 때마다 지도가 흔들리지 않게).
+  const pts = [meet, carPos, myPos].filter(Boolean);
+  const key = pts.length + ':' + meet.lat.toFixed(4) + meet.lng.toFixed(4);
+  if (key !== fitKey && mapReady) {
+    fitKey = key;
+    if (pts.length === 1) map.jumpTo({ center: [meet.lng, meet.lat], zoom: 15 });
+    else {
+      const b = new maplibregl.LngLatBounds();
+      pts.forEach((p) => b.extend([p.lng, p.lat]));
+      // 이름표가 점 위로 올라가서 위쪽 여백을 더 둡니다.
+      map.fitBounds(b, { padding: { top: 64, bottom: 32, left: 40, right: 40 }, maxZoom: 16, duration: 0 });
+    }
+  }
+}
+function mark(key, pos, cls, text) {
+  if (!pos) { marks[key]?.remove(); delete marks[key]; return; }
+  if (!marks[key]) {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = text;
+    marks[key] = new maplibregl.Marker({ element: el, anchor: key === 'me' ? 'center' : 'bottom' }).setLngLat([pos.lng, pos.lat]).addTo(map);
+  } else marks[key].setLngLat([pos.lng, pos.lat]);
+}
+
+// ---- 나침반: 차가 가까워지면 차 쪽을 가리켜요 ----
+// 내 위치는 이 기기의 정밀 위치(GPS, enableHighAccuracy), 방향은 기기 나침반(deviceorientation)으로 구합니다.
+// 차 위치는 서버(GET /journeys/{id}/car, 위치 공유 중일 때만)에서 5초마다 받아요.
+// GPS 오차가 몇 m는 있어서 아주 가까우면 화살표 대신 '바로 근처'로 바꿔요.
+const NEAR_M = Number(params.get('near')) || 300;
+const HERE_M = 15;
+let myPos = null, carPos = null, heading = null, watchId = null, locNote = null, finderOn = false, arrowAngle = 0;
+let carTimer = null, carOverride = false;
+
+// 계획이 정해진 픽업에서만 차 위치를 물어요. 픽업이 끝나면 서버가 409로 위치 공유를 닫아요.
+async function pollCar() {
+  clearTimeout(carTimer);
+  if (!journey || !meetPlace()) return;
+  if (!carOverride) {
+    try {
+      const r = await api('GET', `journeys/${journey.id}/car`);
+      if (r.car && !carOverride) setCar({ ...r.car, journey_id: journey.id });
+    } catch (err) {
+      if (String(err.message).startsWith('409')) { carPos = null; renderWhere(); return; }
+    }
+  }
+  carTimer = setTimeout(pollCar, 5000);
+}
+
+function startLocating() {
+  if (watchId != null || !navigator.geolocation) return;
+  watchId = navigator.geolocation.watchPosition(
+    (p) => { myPos = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }; locNote = null; sendLoc(); renderWhere(); },
+    (e) => { locNote = e.code === 1 ? '위치 권한이 없어 차 방향을 알려 줄 수 없어요' : '내 위치를 찾는 중이에요'; renderWhere(); },
+    { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 },
+  );
+  startCompass();
+}
+function stopLocating() {
+  if (call?.status === 'active') return; // 통화 중에는 위치 공유를 이어가요
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  watchId = null; myPos = null;
+}
+function setCar(d) {
+  const lat = d.lat ?? d.location?.lat, lng = d.lng ?? d.location?.lng;
+  if (lat == null || lng == null) return;
+  if (d.journey_id && journey && d.journey_id !== journey.id) return;
+  carPos = { lat, lng, at: d.observed_at ? Date.parse(d.observed_at) : Date.now() };
+  renderWhere();
+}
+
+let compassStarted = false;
+function startCompass() {
+  if (compassStarted) return;
+  compassStarted = true;
+  // Android Chrome은 deviceorientationabsolute, iPhone은 deviceorientation(webkitCompassHeading)으로 와요.
+  addEventListener('deviceorientationabsolute', onOrient);
+  addEventListener('deviceorientation', onOrient);
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === 'function') {
+    // iPhone(Safari)은 버튼을 눌러 허락해야 방향 값이 와요. 값이 오기 시작하면 버튼을 숨깁니다.
+    $('fCompass').hidden = false;
+    $('fCompass').onclick = async () => {
+      try { if (await DOE.requestPermission() !== 'granted') log('나침반 권한을 받지 못했어요'); }
+      catch (err) { log('나침반 권한: ' + err.message); }
+    };
+  }
+}
+function onOrient(e) {
+  let h = null;
+  if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading; // iPhone: 북쪽에서 시계 방향
+  else if (e.absolute && e.alpha != null) h = 360 - e.alpha;                  // Android: alpha는 반시계 방향
+  if (h == null) return;
+  $('fCompass').hidden = true;
+  heading = (h + (screen.orientation?.angle || 0) + 360) % 360;
+  if (finderOn) renderFinder(distance(myPos, carPos));
+}
+
+const RAD = Math.PI / 180;
+function distance(a, b) {
+  const dLat = (b.lat - a.lat) * RAD, dLng = (b.lng - a.lng) * RAD;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(h));
+}
+function bearing(a, b) {
+  const y = Math.sin((b.lng - a.lng) * RAD) * Math.cos(b.lat * RAD);
+  const x = Math.cos(a.lat * RAD) * Math.sin(b.lat * RAD) - Math.sin(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.cos((b.lng - a.lng) * RAD);
+  return (Math.atan2(y, x) / RAD + 360) % 360;
+}
+const SIDE = (rel) => {
+  const a = Math.abs(rel), side = rel > 0 ? '오른쪽' : '왼쪽';
+  if (a <= 20) return '앞쪽이에요';
+  if (a <= 60) return `${side} 앞`;
+  if (a <= 120) return side;
+  if (a <= 160) return `${side} 뒤`;
+  return '뒤쪽이에요';
+};
+const COMPASS = ['북쪽', '북동쪽', '동쪽', '남동쪽', '남쪽', '남서쪽', '서쪽', '북서쪽'];
+
+function renderFinder(d) {
+  const vehicle = journey?.driver?.vehicle;
+  $('fCar').textContent = [vehicle, meetPlace()?.name && `${meetPlace().name} 근처`].filter(Boolean).join(' · ');
+  const close = d <= Math.max(HERE_M, Math.min(myPos.acc || 0, 40));
+  $('fArrow').style.visibility = close ? 'hidden' : 'visible';
+  $('fRing1').hidden = $('fRing2').hidden = !close;
+  const notes = [];
+  if (Date.now() - carPos.at > 60000) notes.push(`차 위치가 ${Math.round((Date.now() - carPos.at) / 60000)}분 전 정보예요`);
+  if ((myPos.acc || 0) > 30) notes.push(`내 위치 오차가 ${Math.round(myPos.acc)}m쯤이에요`);
+  if (close) {
+    $('finder').classList.add('on');
+    $('fKicker').textContent = '차가 바로 옆에 있어요';
+    $('fDist').innerHTML = '바로 근처';
+    $('fHint').textContent = '주위를 둘러보세요';
+    $('fNote').textContent = notes.join(' · ');
+    return;
+  }
+  const b = bearing(myPos, carPos);
+  const rel = heading == null ? b : ((b - heading + 540) % 360) - 180;
+  // 359°→0°로 넘어갈 때 화살표가 한 바퀴 돌지 않게 가까운 쪽으로 돌립니다.
+  arrowAngle += ((rel - arrowAngle) % 360 + 540) % 360 - 180;
+  $('fArrow').style.transform = `rotate(${arrowAngle}deg)`;
+  $('fKicker').textContent = '차가 가까워요';
+  $('fDist').innerHTML = d < 1000 ? `${Math.max(5, Math.round(d / 5) * 5)}<small>m</small>` : `${(d / 1000).toFixed(1)}<small>km</small>`;
+  if (heading == null) {
+    $('finder').classList.remove('on');
+    $('fHint').textContent = COMPASS[Math.round(b / 45) % 8];
+    notes.unshift('나침반을 못 써서 화살표는 북쪽(위) 기준이에요');
+  } else {
+    $('finder').classList.toggle('on', Math.abs(rel) <= 20);
+    $('fHint').textContent = SIDE(rel);
+  }
+  $('fNote').textContent = notes.join(' · ');
+}
+
+// 시험용: 에뮬레이터 차는 움직이지 않아서, 자동 흐름이 차가 다가오는 위치를 넣어 봅니다(넣은 뒤로는 서버 위치로 덮지 않아요).
+window.audeoTest = {
+  car: (lat, lng) => { carOverride = true; setCar({ lat, lng }); },
+  relocate: () => { if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null; myPos = null; startLocating(); renderWhere(); },
+  stopLocating,
+  say: (i, n) => sayLine(i, n),
+  dial: () => dial(),
+  hangup: () => hangup(),
+};
+
+start().catch((e) => { $('headline').textContent = '시작하지 못했어요'; log(e.message); });
 </script>
 </body>
 </html>

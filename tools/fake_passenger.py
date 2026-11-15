@@ -7,7 +7,7 @@
   python3 tools/fake_passenger.py register --invite <초대 코드> --name 김민지 --short 민지 --phone 010-0000-0002
   python3 tools/fake_passenger.py run              # 걸려 온 전화를 동의하고 받고, 이벤트를 출력
   python3 tools/fake_passenger.py call 운전자       # 이름에 '운전자'가 들어간 연락처에게 전화(차량 수신 테스트)
-  python3 tools/fake_passenger.py late 10          # 진행 중 여정에 "10분 늦어"
+  python3 tools/fake_passenger.py late 10          # 진행 중 여정에 "10분 늦어" (--reason "기차가 늦어져서")
   python3 tools/fake_passenger.py ready baggage    # 준비 상태 보고(in_transit, baggage, walking, at_spot …)
 
 토큰은 tools/.fake_passenger.json(커밋 안 됨)에 저장합니다. AUDEO_API_BASE_URL로 서버를 바꿀 수 있어요.
@@ -106,7 +106,7 @@ def cmd_call(a):
 def cmd_late(a):
     token = load()["token"]
     jid = active_journey(token)
-    api("POST", f"journeys/{jid}/voice", {"text": f"수하물이 늦게 나와서 {a.minutes}분 늦어"}, token=token)
+    api("POST", f"journeys/{jid}/voice", {"text": f"{a.reason} {a.minutes}분 늦어"}, token=token)
     print(f"{jid}: {a.minutes}분 늦는다고 보냈어요")
 
 
@@ -135,6 +135,7 @@ def main():
     r.set_defaults(fn=cmd_call)
     r = sub.add_parser("late")
     r.add_argument("minutes", type=int, nargs="?", default=10)
+    r.add_argument("--reason", default="수하물이 늦게 나와서", help="늦는 까닭(예: \"기차가 늦어져서\")")
     r.set_defaults(fn=cmd_late)
     r = sub.add_parser("ready")
     r.add_argument("state", choices=["unknown", "in_transit", "baggage", "preparing", "ready", "walking", "at_spot"])

@@ -5,6 +5,7 @@ import com.audeo.app.audeo.CallInfo
 import com.audeo.app.audeo.Contact
 import com.audeo.app.audeo.Coordination
 import com.audeo.app.audeo.Journey
+import com.audeo.app.audeo.Place
 import com.audeo.app.audeo.Proposal
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -112,6 +113,17 @@ class AudeoServer(
         authed("PUT", "devices/me/capabilities", capabilities)
     }
 
+    /**
+     * 이 차가 아는 장소(내비 즐겨찾기·최근 목적지, 지도에서 찾은 곳). 서버는 대화에 나온 장소 이름을
+     * 이 목록에서 찾아 좌표를 붙여요(목록에 없으면 '어디서 만날까요?'로 되묻습니다).
+     */
+    suspend fun putSavedPlaces(bookmarks: List<Place>, recent: List<Place>) {
+        fun arr(list: List<Place>) = JSONArray().apply {
+            list.forEach { p -> put(JSONObject().put("name", p.name).put("lat", p.latitude).put("lng", p.longitude).putOpt("address", p.address)) }
+        }
+        authed("PUT", "devices/me/saved-places", JSONObject().put("bookmarks", arr(bookmarks)).put("recent", arr(recent)))
+    }
+
     suspend fun contacts(): List<Contact> =
         authed("GET", "contacts").optJSONArray("contacts").objects().map(Protocol::contact)
 
@@ -154,7 +166,21 @@ class AudeoServer(
     }
 
     /** '차 탔어요'. 당사자가 누른 것이므로 서버가 바로 완료합니다. */
+    /** '수정': 운전자가 직접 정한 값(source=user, 확정). 장소는 저장 장소 목록에 있는 이름이어야 좌표가 붙어요. */
+    suspend fun patchField(journeyId: String, key: String, value: String, baseVersion: Int): Journey =
+        Protocol.journey(authed("PATCH", "journeys/$journeyId/fields/$key", JSONObject().put("value", value).put("base_version", baseVersion)))
+
+    /** 수정한 뒤 계획 카드를 다시 만들어 달라고 합니다. */
+    suspend fun planNow(journeyId: String) {
+        authed("POST", "journeys/$journeyId/plan")
+    }
+
     suspend fun complete(journeyId: String): Journey = Protocol.journey(authed("POST", "journeys/$journeyId/complete"))
+
+    /** 픽업 취소. 서버가 위치 공유와 조율을 끝내고 journey.ended(cancelled)를 보내요. */
+    suspend fun cancel(journeyId: String) {
+        authed("POST", "journeys/$journeyId/cancel")
+    }
 
     suspend fun coordination(journeyId: String): Coordination? =
         authed("GET", "journeys/$journeyId/coordination").optJSONObject("coordination")?.let(Protocol::coordination)

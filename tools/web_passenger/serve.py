@@ -8,6 +8,9 @@
 - 탑승자 대사는 macOS `say`로 한국어 음성(audio/lineN.wav)을 처음 실행할 때 만듭니다.
 
   python3 tools/web_passenger/serve.py            # http://127.0.0.1:8787/?auto=1
+  내 목소리로: http://127.0.0.1:8787/?mic=1 (이어폰 권장), 통화 녹음: &record=1
+  상황 고르기: &scenario=cold(기본, 추운 날 공항) | hot(더운 날 에어컨) | train(KTX 서울역)
+             | restroom(KTX, 가는 중에 탑승자가 다시 전화해 화장실 때문에 3분 늦는다고 말함)
 토큰은 tools/fake_passenger.py register 로 만든 tools/.fake_passenger.json 을 씁니다.
 """
 import json
@@ -23,20 +26,93 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(HERE, "..", ".fake_passenger.json")
 BASE = os.environ.get("AUDEO_API_BASE_URL", "https://audeo.mosslab.dev/api/v1/").rstrip("/")
 PORT = int(os.environ.get("PORT", "8787"))
+# ?record=1 로 녹음한 통화 음성을 저장할 곳
+REC_DIR = os.environ.get("AUDEO_REC_DIR", os.path.join(HERE, "recordings"))
 
-# 탑승자가 통화에서 하는 말(차가 받아써서 서버 AI가 약속을 정리합니다).
-LINES = [
-    "응, 나 오늘 인천공항으로 들어가.",
-    "대한항공 케이이 칠백십이 편 타고, 세 시 사십 분에 도착해.",
-    "제 이 터미널이야. 짐 찾고 나오면 네 시 십 분쯤 될 거야.",
-    "바깥 날씨가 많이 춥대. 차 안 따뜻하게 해 줘.",
-]
+# 상황별로 탑승자가 통화에서 하는 말(차가 받아써서 서버 AI가 약속을 정리합니다). 페이지 주소의 ?scenario= 로 고릅니다.
+# 서버는 지금 시각과 만남 시각을 비교해(차가 늦으면 변경 제안, 만남이 가까우면 차량 준비 제안) 움직이므로,
+# 도착·만남 시각은 페이지를 열 때 지금 기준으로 정합니다: {arr} = 약 20분 뒤 도착, {meet} = 그 25분 뒤.
+SCENARIOS = {
+    # 비 오고 추운 날 공항 픽업(기본)
+    "cold": [
+        "응, 나 오늘 인천공항으로 들어가.",
+        "대한항공 케이이 칠백십이 편 타고, {arr}에 도착해.",
+        "제 이 터미널이야. 짐 찾고 나오면 {meet}쯤 될 거야.",
+        "바깥 날씨가 많이 춥대. 차 안 따뜻하게 해 줘.",
+    ],
+    # 더운 날: 에어컨을 틀어 달라는 요청
+    "hot": [
+        "응, 나 오늘 인천공항으로 들어가.",
+        "대한항공 케이이 칠백십이 편 타고, {arr}에 도착해.",
+        "제 이 터미널 삼번 출구로 나갈게. {meet}쯤 될 거야.",
+        "오늘 날씨가 너무 덥대. 에어컨 좀 시원하게 틀어 줘.",
+    ],
+    # 열차번호를 모르고 지나는 역만 말함 → 서버가 시간표로 열차를 찾는다 (시연 영상 KTX 장면)
+    "ktx": [
+        "나 지금 케이티엑스 타고 서울역 가는 중이야. 서울역 삼번 출구에서 만나.",
+        "번호는 몰라! 광명 지나!",
+        "캐리어 두 개 있어.",
+    ],
+    # 비행기가 아니라 기차(KTX)
+    "train": [
+        "나 오늘 부산에서 케이티엑스 타고 서울역으로 올라가.",
+        "케이티엑스 이십사 열차고, {arr}에 서울역 도착이야.",
+        "서울역 서부역 쪽으로 나갈게. 캐리어 하나 있어.",
+        "오늘 좀 덥대. 차 안 시원하게 해 줘.",
+    ],
+}
+SCENARIOS["restroom"] = SCENARIOS["train"]
+
+# 시연 영상(티저) 장면의 대사 그대로. 목소리는 macOS say가 아니라 글레오(Pleos) TTS로 미리 만들어 둔
+# audio/film/<이름>/lineN.wav 를 씁니다(에뮬레이터에서 글레오 TTS로 말하게 하고 소리를 받아 저장).
+# 대사는 시연 도구가 영상 시각에 맞춰 audeoTest.say(n) 으로 하나씩 말하게 해요(?script=manual).
+FILM = {
+    # 엄마(탑승자): 아파트 정문 픽업
+    "film_gate": ["어 아들.", "어 나왔어.", "오늘 좀 춥네.", "근데 정문 어디?"],
+    # 지호(탑승자): KTX 타고 서울역으로
+    "film_ktx": ["기차가 무슨 편이더라?", "광명 지나고 있어!", "그 서울역!"],
+}
+# 가는 중에 탑승자가 운전자에게 다시 거는 전화의 대사(따로 알리는 화면 없이 통화로만 말해요).
+LATER_CALLS = {
+    "restroom": [
+        ["나 화장실 좀 다녀오느라 삼 분 정도 늦을 것 같아.", "조금만 기다려 줘. 금방 나갈게."],
+    ],
+}
+
+
+HOURS = ["열두", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟", "아홉", "열", "열한"]
+DIGITS = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
+
+
+def say_time(t):
+    """14:25 → '오후 두 시 이십오 분' (TTS가 읽기 좋게 한글로)."""
+    part = "오전" if t.hour < 12 else ("오후" if t.hour < 18 else "저녁")
+    m = t.minute
+    mins = "" if m == 0 else ((DIGITS[m // 10] if m >= 20 else "") + ("십" if m >= 10 else "") + DIGITS[m % 10] + " 분")
+    return f"{part} {HOURS[t.hour % 12]} 시 {mins}".strip()
+
+
+def timed_lines(name):
+    """지금 기준 도착·만남 시각을 넣은 대사."""
+    import datetime
+    now = datetime.datetime.now()
+    arr = now + datetime.timedelta(minutes=20)
+    arr = arr.replace(minute=(arr.minute // 5) * 5, second=0, microsecond=0)
+    meet = arr + datetime.timedelta(minutes=25)
+    return [l.format(arr=say_time(arr), meet=say_time(meet)) for l in SCENARIOS[name]], arr.strftime("%H%M")
 
 
 def ensure_audio():
-    out = os.path.join(HERE, "audio")
+    for name in SCENARIOS:
+        lines, stamp = timed_lines(name)
+        make_audio(os.path.join(HERE, "audio", name, stamp), lines)
+        for n, later in enumerate(LATER_CALLS.get(name, []), 1):
+            make_audio(os.path.join(HERE, "audio", name, f"later{n}"), later)
+
+
+def make_audio(out, lines):
     os.makedirs(out, exist_ok=True)
-    for i, text in enumerate(LINES, 1):
+    for i, text in enumerate(lines, 1):
         wav = os.path.join(out, f"line{i}.wav")
         if os.path.exists(wav):
             continue
@@ -70,9 +146,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/"):
             return self._proxy("GET")
-        if self.path == "/config.json":
+        if self.path.startswith("/config.json"):
             ws = BASE.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
-            return self._send(200, json.dumps({"ws": ws, "token": token(), "lines": len(LINES), "texts": LINES}, ensure_ascii=False))
+            q = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
+            if q.get("scenario") in FILM:
+                name = q["scenario"]
+                texts = FILM[name]
+                calls = [{"texts": texts, "files": [f"audio/film/{name}/line{i}.wav" for i in range(1, len(texts) + 1)]}]
+                return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "calls": calls}, ensure_ascii=False))
+            name = q.get("scenario", "cold") if q.get("scenario") in SCENARIOS else "cold"
+            # calls[0] = 운전자가 건 첫 통화의 대사, calls[1..] = 탑승자가 나중에 다시 건 통화의 대사
+            lines, stamp = timed_lines(name)
+            calls = [(f"{name}/{stamp}", lines)] + [(f"{name}/later{n}", l) for n, l in enumerate(LATER_CALLS.get(name, []), 1)]
+            out = []
+            for folder, texts in calls:
+                make_audio(os.path.join(HERE, "audio", folder), texts)
+                out.append({"texts": texts, "files": [f"audio/{folder}/line{i}.wav" for i in range(1, len(texts) + 1)]})
+            return self._send(200, json.dumps({"ws": ws, "token": token(), "scenario": name, "calls": out}, ensure_ascii=False))
         path = self.path.split("?", 1)[0]
         name = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(HERE, name))
@@ -85,6 +175,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.startswith("/api/"):
             return self._proxy("POST")
+        if self.path.startswith("/upload"):
+            # 페이지가 녹음한 통화 음성(webm). t0 = 녹음을 시작한 시각(ms)
+            q = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
+            t0 = "".join(ch for ch in q.get("t0", "0") if ch.isdigit()) or "0"
+            os.makedirs(REC_DIR, exist_ok=True)
+            path = os.path.join(REC_DIR, f"call-{t0}.webm")
+            with open(path, "wb") as f:
+                f.write(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            return self._send(200, json.dumps({"file": path}))
         self._send(404, "{}")
 
     def _proxy(self, method):

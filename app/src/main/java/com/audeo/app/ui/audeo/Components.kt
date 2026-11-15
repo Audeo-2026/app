@@ -8,7 +8,15 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -106,11 +115,13 @@ fun AudeoButton(
         iconOnly -> m.width(size.height)
         else -> m
     }
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = m
+            .pressScale(interaction)
             .clip(shape)
             .background(bg)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .clickable(interactionSource = interaction, indication = LocalIndication.current, enabled = enabled, role = Role.Button, onClick = onClick)
             .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier)
             .padding(horizontal = if (iconOnly) 0.dp else size.padding),
         horizontalArrangement = Arrangement.spacedBy(Space.s2, Alignment.CenterHorizontally),
@@ -129,6 +140,7 @@ fun SourceTag(kind: SourceKind, label: String? = null) {
     val (bg, fg) = when (kind) {
         SourceKind.CONVERSATION -> c.surface2 to c.ink
         SourceKind.LOOKUP -> c.brandSoft to c.brandInk
+        SourceKind.DEMO -> c.cautionSoft to c.caution
         SourceKind.ESTIMATE -> Color.Transparent to c.inkMuted
         SourceKind.CONFIRM -> c.cautionSoft to c.caution
         SourceKind.USER -> c.surface2 to c.ink
@@ -138,7 +150,8 @@ fun SourceTag(kind: SourceKind, label: String? = null) {
         m = m.dashedBorder(c.inkMuted, Radius.sm)
     }
     Box(m.padding(horizontal = Space.s2), contentAlignment = Alignment.Center) {
-        Text(label ?: kind.label, style = AudeoType.label, color = fg, maxLines = 1)
+        // 시연 데이터는 서버가 다른 이름(label)을 붙여도 늘 '시연 데이터'로 보여요(조회 값처럼 보이지 않게).
+        Text(if (kind == SourceKind.DEMO) kind.label else label ?: kind.label, style = AudeoType.label, color = fg, maxLines = 1)
     }
 }
 
@@ -172,160 +185,6 @@ fun StatusPill(status: PlanStatus) {
     ) {
         Text(status.label, style = AudeoType.label, color = fg, maxLines = 1)
     }
-}
-
-private val BARS = listOf(0.45f, 0.8f, 1f, 0.7f, 0.4f)
-
-/** 듣는 중·말하는 중·정리하는 중·대기를 보여 주는 음성 원. 파형은 가운데 막대 5개. */
-@Composable
-fun VoiceOrb(mode: VoiceMode, size: Dp = 72.dp, inStrip: Boolean = true) {
-    val c = Audeo.colors
-    val speaking = mode == VoiceMode.SPEAKING
-    val bg = when {
-        speaking -> c.brand
-        inStrip -> c.surface
-        else -> c.surface2
-    }
-    val fg = when {
-        speaking -> c.onBrand
-        mode == VoiceMode.IDLE -> c.inkMuted
-        else -> c.ink
-    }
-    val barHeight = size * 0.39f
-    val barWidth = if (size >= 100.dp) 8.dp else 5.dp
-    Box(Modifier.size(size).clip(CircleShape).background(bg), contentAlignment = Alignment.Center) {
-        when (mode) {
-            VoiceMode.LISTENING, VoiceMode.SPEAKING -> {
-                val transition = rememberInfiniteTransition(label = "wave")
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    BARS.forEachIndexed { i, h ->
-                        val s by transition.animateFloat(
-                            initialValue = 0.45f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(
-                                tween(550, easing = FastOutSlowInEasing),
-                                RepeatMode.Reverse,
-                                StartOffset(i * 90),
-                            ),
-                            label = "bar$i",
-                        )
-                        Box(
-                            Modifier
-                                .width(barWidth)
-                                .height(barHeight * h)
-                                .scale(1f, s)
-                                .clip(CircleShape)
-                                .background(fg),
-                        )
-                    }
-                }
-            }
-            VoiceMode.THINKING -> {
-                val transition = rememberInfiniteTransition(label = "dots")
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    repeat(3) { i ->
-                        val a by transition.animateFloat(
-                            0.3f, 1f,
-                            infiniteRepeatable(tween(600), RepeatMode.Reverse, StartOffset(i * 200)),
-                            label = "dot$i",
-                        )
-                        Box(Modifier.size(10.dp).clip(CircleShape).background(fg.copy(alpha = a)))
-                    }
-                }
-            }
-            VoiceMode.IDLE -> Icon(AudeoIcon.MicOff.vector, contentDescription = null, tint = fg, modifier = Modifier.size(32.dp))
-        }
-    }
-}
-
-/** 다이얼로그 안의 음성 칸: Audeo가 지금 하는 말이나 듣고 있는 말 한 줄. */
-@Composable
-fun VoiceStrip(voice: VoiceUi, modifier: Modifier = Modifier) {
-    val c = Audeo.colors
-    val speaking = voice.mode == VoiceMode.SPEAKING
-    val who = voice.who ?: when (voice.mode) {
-        VoiceMode.LISTENING -> "듣는 중"
-        VoiceMode.SPEAKING -> "Audeo가 말하는 중"
-        VoiceMode.THINKING -> "정리하는 중"
-        VoiceMode.IDLE -> "대기 중"
-    }
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
-            .background(c.surface2)
-            .padding(Space.s4),
-        horizontalArrangement = Arrangement.spacedBy(Space.s4),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        VoiceOrb(voice.mode)
-        Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-            Text(who, style = AudeoType.bodySm, color = if (speaking) c.brandInk else c.inkMuted)
-            voice.caption?.let { Text(it, style = AudeoType.bodyLg.copy(fontWeight = FontWeight.SemiBold), color = c.ink) }
-            voice.hint?.let { Text(it, style = AudeoType.bodySm, color = c.inkMuted) }
-        }
-    }
-}
-
-/** Audeo 통화 중 지도 위 맨 위에 붙는 112dp 바. */
-@Composable
-fun CallBar(
-    name: String,
-    role: String,
-    duration: String,
-    aiOn: Boolean,
-    aiLabel: String,
-    muted: Boolean,
-    onMute: () -> Unit,
-    onEnd: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val c = Audeo.colors
-    Row(
-        modifier
-            .fillMaxWidth()
-            .height(Dimens.callbarH)
-            .floatingSurface()
-            .padding(horizontal = Space.s2),
-        horizontalArrangement = Arrangement.spacedBy(Space.s4),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(Dimens.touchMin).clip(CircleShape).background(c.surface2), contentAlignment = Alignment.Center) {
-                Text(name.take(1), style = AudeoType.title, color = c.ink)
-            }
-            Column {
-                Text(name, style = AudeoType.bodyLg.copy(fontWeight = FontWeight.SemiBold), color = c.ink, maxLines = 1)
-                Text(role, style = AudeoType.bodySm, color = c.inkMuted, maxLines = 1)
-            }
-        }
-        Text(duration, style = AudeoType.figureSm, color = c.inkMuted)
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.s1), verticalAlignment = Alignment.CenterVertically) {
-            BlinkDot(if (aiOn) c.brandInk else c.inkFaint, blink = aiOn)
-            Text(aiLabel, style = AudeoType.bodySm, color = if (aiOn) c.brandInk else c.inkMuted, maxLines = 1)
-        }
-        Spacer(Modifier.weight(1f))
-        AudeoButton(
-            text = null,
-            onClick = onMute,
-            size = ButtonSize.MD,
-            icon = if (muted) AudeoIcon.MicOff else AudeoIcon.Mic,
-            description = if (muted) "마이크 켜기" else "마이크 끄기",
-        )
-        AudeoButton("통화 종료", onEnd, variant = ButtonVariant.DANGER, size = ButtonSize.MD, icon = AudeoIcon.PhoneEnd)
-    }
-}
-
-@Composable
-private fun BlinkDot(color: Color, blink: Boolean) {
-    val alpha = if (blink) {
-        val t = rememberInfiniteTransition(label = "blink")
-        val a by t.animateFloat(0.3f, 1f, infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "a")
-        a
-    } else {
-        1f
-    }
-    Box(Modifier.size(14.dp).clip(CircleShape).background(color.copy(alpha = alpha)))
 }
 
 /** 승인한 일이 실제로 실행됐는지. 결과가 불분명하면 pending으로 두고 성공으로 보이지 않게 합니다. */

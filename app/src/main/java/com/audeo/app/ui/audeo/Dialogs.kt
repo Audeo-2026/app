@@ -1,5 +1,8 @@
 package com.audeo.app.ui.audeo
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +27,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,93 +50,6 @@ import com.audeo.app.ui.theme.AudeoType
 import com.audeo.app.ui.theme.Dimens
 import com.audeo.app.ui.theme.Radius
 import com.audeo.app.ui.theme.Space
-
-/**
- * 지도 위 다이얼로그의 공통 틀. 구역 순서는 디자인 시스템과 같습니다:
- * 머리(kicker·제목·상태) → 핵심 숫자 → 근거 → 본문 → 음성 칸 → 버튼 → 음성 답 안내 → 각주.
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-fun AudeoDialog(
-    modifier: Modifier = Modifier,
-    tone: Tone = Tone.NEUTRAL,
-    kicker: String? = null,
-    title: String? = null,
-    subtitle: String? = null,
-    status: PlanStatus? = null,
-    figureLabel: String? = null,
-    figure: String? = null,
-    figureNote: String? = null,
-    reasons: List<Reason> = emptyList(),
-    voice: VoiceUi? = null,
-    voiceHint: String? = null,
-    footnote: String? = null,
-    actions: (@Composable () -> Unit)? = null,
-    body: (@Composable ColumnScope.() -> Unit)? = null,
-) {
-    val c = Audeo.colors
-    Column(
-        modifier
-            .width(Dimens.dialogW)
-            .floatingSurface()
-            .padding(Space.s5),
-        verticalArrangement = Arrangement.spacedBy(Space.s4),
-    ) {
-        if (kicker != null || title != null || status != null) {
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s3), verticalAlignment = Alignment.Top) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    kicker?.let {
-                        val kc = when (tone) {
-                            Tone.BRAND -> c.brandInk
-                            Tone.CAUTION -> c.caution
-                            Tone.NEUTRAL -> c.inkMuted
-                        }
-                        Text(it, style = AudeoType.label, color = kc)
-                    }
-                    title?.let { Text(it, style = AudeoType.title, color = c.ink) }
-                    subtitle?.let { Text(it, style = AudeoType.bodySm, color = c.inkMuted) }
-                }
-                status?.let { StatusPill(it) }
-            }
-        }
-        if (figure != null) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                figureLabel?.let { Text(it, style = AudeoType.bodyLg, color = c.inkMuted) }
-                Text(figure, style = AudeoType.eta, color = c.ink)
-                figureNote?.let { Text(it, style = AudeoType.bodyLg, color = c.ink) }
-            }
-        }
-        if (reasons.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-                reasons.forEach { r ->
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(Space.s2),
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        r.source?.let { SourceTag(it, r.label) }
-                        Text(r.text, style = AudeoType.body, color = c.ink, modifier = Modifier.align(Alignment.CenterVertically))
-                    }
-                }
-            }
-        }
-        body?.invoke(this)
-        voice?.let { VoiceStrip(it) }
-        if (actions != null) {
-            FlowRow(
-                modifier = Modifier.padding(top = Space.s1),
-                horizontalArrangement = Arrangement.spacedBy(Space.s2),
-                verticalArrangement = Arrangement.spacedBy(Space.s2),
-            ) { actions() }
-        }
-        voiceHint?.let { Text(it, style = AudeoType.bodySm, color = c.inkMuted, modifier = Modifier.offset(y = -Space.s2)) }
-        footnote?.let {
-            Column {
-                HorizontalDivider(thickness = 2.dp, color = c.line)
-                Text(it, style = AudeoType.bodySm, color = c.inkMuted, modifier = Modifier.padding(top = Space.s3))
-            }
-        }
-    }
-}
 
 /** 약속 필드: 라벨 · 값 · 출처. 방금 바뀐 값은 파랑 점과 brand-ink. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -313,37 +230,5 @@ fun EtaCompareBody(start: String, end: String, now: String?, lanes: List<EtaLane
             }
         }
         verdict?.let { Text(it, style = AudeoType.bodyLg, color = c.ink) }
-    }
-}
-
-/** Audeo 통화를 걸 상대. 줄 전체가 버튼입니다. */
-@Composable
-fun ContactRows(contacts: List<Contact>, onCall: (Contact) -> Unit) {
-    val c = Audeo.colors
-    Column(verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-        contacts.forEach { person ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = Dimens.controlH)
-                    .clip(RoundedCornerShape(Radius.md))
-                    .background(c.surface2)
-                    .clickable(role = Role.Button) { onCall(person) }
-                    .padding(start = Space.s3, end = Space.s2, top = Space.s2, bottom = Space.s2),
-                horizontalArrangement = Arrangement.spacedBy(Space.s3),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(Dimens.touchMin).clip(CircleShape).background(c.surface), contentAlignment = Alignment.Center) {
-                    Text(person.name.take(1), style = AudeoType.title, color = c.ink)
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(person.name, style = AudeoType.bodyLg.copy(fontWeight = FontWeight.SemiBold), color = c.ink)
-                    Text(person.note, style = AudeoType.bodySm, color = c.inkMuted)
-                }
-                Box(Modifier.size(Dimens.touchMin).clip(CircleShape).background(c.brand), contentAlignment = Alignment.Center) {
-                    Icon(AudeoIcon.Phone.vector, contentDescription = "${person.name}에게 Audeo 통화 걸기", tint = c.onBrand, modifier = Modifier.size(32.dp))
-                }
-            }
-        }
     }
 }
